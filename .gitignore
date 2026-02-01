@@ -1,0 +1,27 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Data
+data/**/*.zip
+data/**/*.csv
+# But keep the directories
+!data/**/.gitkeep
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Lean
+*.log
+launcher.log
+backtests/
