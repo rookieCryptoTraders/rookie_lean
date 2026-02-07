@@ -91,8 +91,10 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # 3. Risk Management Model - 使用标准模型组合
         # 策略：多层风控体系
 
-        # A. 移动止损 (优先保护浮盈) - 5% 回调
-        # 当价格从最高点回撤 5% 时平仓，用于锁定利润
+        # A. 移动止损 (锁定利润) - 5% 回调
+        # 自动适配方向：
+        # - 多头 (Long): 从最高价回撤 5% 平仓
+        # - 空头 (Short): 从最低价反弹 5% 平仓
         self.AddRiskManagement(TrailingStopRiskManagementModel(0.05))
 
         # B. 个股硬止损 (防止单币种爆仓) - 10% 绝对亏损
