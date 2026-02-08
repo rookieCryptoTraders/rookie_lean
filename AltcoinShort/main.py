@@ -2,12 +2,7 @@
 from AlgorithmImports import *
 
 # 导入自定义模块
-# 导入自定义模块
 from alpha import AltcoinShortAlphaModel
-from universe import AltcoinFuturesUniverseSelectionModel
-
-# portfolio.py is removed
-# risk.py is removed
 from execution import SmartSpreadExecutionModel
 # endregion
 
@@ -30,7 +25,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
 
     模块化架构：
     - Alpha Model: 生成做空信号 (Insight with Weight)
-    - Universe Selection: 手动预设 Crypto Future 池
+    - AddCryptoFuture: 直接添加 Binance 永续合约
     - Portfolio Construction Model: 官方 InsightWeighting 模型
     - Risk Management Model: 标准模型组合
     - Execution Model: 智能价差执行
@@ -42,12 +37,21 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # =====================================================================
         # 基本设置
         # =====================================================================
-        self.SetStartDate(2024, 1, 1)
-        self.SetEndDate(2024, 12, 31)
+        self.SetStartDate(2025, 1, 1)
+        self.SetEndDate(2025, 3, 1)
+        self.SetAccountCurrency("USDT")
         self.SetCash(100000)
 
-        # 设置券商模型
+        # 设置券商模型 - Binance Futures (永续合约)
         self.SetBrokerageModel(BrokerageName.BinanceFutures, AccountType.Margin)
+
+        # =====================================================================
+        # 重要：禁用 Insight/Security 变化时的自动重平衡
+        # 只在定时器触发时重平衡 (每小时一次)
+        # 风险管理订单仍然会正常触发
+        # =====================================================================
+        self.Settings.RebalancePortfolioOnInsightChanges = False
+        self.Settings.RebalancePortfolioOnSecurityChanges = False
 
         # =====================================================================
         # 策略参数
@@ -56,16 +60,9 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         LEVERAGE = 2
 
         # =====================================================================
-        # Universe Settings - 全局证券设置
+        # 添加 Crypto Futures - 使用 AddCryptoFuture
         # =====================================================================
-        self.UniverseSettings.Resolution = Resolution.Hour
-        self.UniverseSettings.Leverage = LEVERAGE
-        self.UniverseSettings.DataNormalizationMode = DataNormalizationMode.Raw
-
-        # =====================================================================
-        # Universe Selection - 添加交易标的
-        # =====================================================================
-        self.SetUniverseSelection(AltcoinFuturesUniverseSelectionModel())
+        self._add_crypto_futures(leverage=LEVERAGE)
 
         # =====================================================================
         # 设置 Algorithm Framework 模块
@@ -86,7 +83,11 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # 2. Portfolio Construction Model - 使用官方模型
         # 它会自动根据 Insight.Weight 来分配仓位
         # 如果所有 Weight 之和 > 1，它会自动归一化
-        self.SetPortfolioConstruction(InsightWeightingPortfolioConstructionModel())
+        # rebalance=Resolution.Hour: 每小时重新平衡一次
+        # (RebalanceOnInsightChanges 和 RebalanceOnSecurityChanges 已通过 Settings 禁用)
+        self.SetPortfolioConstruction(
+            InsightWeightingPortfolioConstructionModel(Resolution.Hour)
+        )
 
         # 3. Risk Management Model - 使用标准模型组合
         # 策略：多层风控体系
@@ -130,6 +131,99 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         self.Debug("Using Standard Risk Models (0.05 MaxDD / 0.05 MaxProfit)")
         self.Debug("=" * 60)
 
+    def _add_crypto_futures(self, leverage: int = 2) -> None:
+        """
+        添加 Binance 永续合约交易标的
+
+        使用 AddCryptoFuture 是添加永续合约的标准方式，
+        它会自动配置正确的数据路径和合约属性。
+        """
+        # Altcoin 列表 - 市值排名 15-300 的代币
+        # 注意：排除 BTC/ETH (太大)、Stablecoin、RWA 类
+        tickers = [
+            # Top Layer 1s (排除 BTC/ETH)
+            "BNBUSDT",
+            "XRPUSDT",
+            "ADAUSDT",
+            "SOLUSDT",
+            "DOTUSDT",
+            "LTCUSDT",
+            "AVAXUSDT",
+            "TRXUSDT",
+            # Layer 2s
+            "OPUSDT",
+            "ARBUSDT",
+            # Newer High Cap
+            "APTUSDT",
+            "SUIUSDT",
+            "SEIUSDT",
+            "TIAUSDT",
+            "EOSUSDT",
+            "NEARUSDT",
+            "ATOMUSDT",
+            "ETCUSDT",
+            "XLMUSDT",
+            "FILUSDT",
+            "HBARUSDT",
+            "VETUSDT",
+            "ICPUSDT",
+            "INJUSDT",
+            "STXUSDT",
+            # DeFi Blue Chips
+            "LINKUSDT",
+            "UNIUSDT",
+            "AAVEUSDT",
+            "CRVUSDT",
+            "LDOUSDT",
+            # Gaming / Metaverse
+            "AXSUSDT",
+            "SANDUSDT",
+            "MANAUSDT",
+            "GALAUSDT",
+            # Infrastructure
+            "GRTUSDT",
+            "FETUSDT",
+            "JASMYUSDT",
+            # Older Gen
+            "BCHUSDT",
+            "ALGOUSDT",
+            "XTZUSDT",
+            "CHZUSDT",
+            "NEOUSDT",
+            "IOTAUSDT",
+            "DASHUSDT",
+            "ZECUSDT",
+            "XMRUSDT",
+            # Meme & Community
+            "DOGEUSDT",
+            "WIFUSDT",
+            # Others / High Volatility candidates
+            "CAKEUSDT",
+            "QNTUSDT",
+        ]
+
+        added_count = 0
+        for ticker in tickers:
+            try:
+                # AddCryptoFuture 是添加永续合约的标准 API
+                # 它会自动：
+                # 1. 设置正确的 SecurityType (CryptoFuture)
+                # 2. 配置正确的数据路径 (cryptofuture/binance/...)
+                # 3. 设置合约属性 (保证金、手续费等)
+                crypto_future = self.AddCryptoFuture(
+                    ticker,
+                    Resolution.Minute,
+                    Market.Binance,
+                    fillForward=True,
+                    leverage=leverage,
+                )
+                added_count += 1
+                self.Debug(f"[Init] Added CryptoFuture: {ticker}")
+            except Exception as e:
+                self.Debug(f"[Init] Failed to add {ticker}: {e}")
+
+        self.Debug(f"[Init] Total CryptoFutures added: {added_count}/{len(tickers)}")
+
     def _log_status(self) -> None:
         """定时状态日志"""
         holdings = [h for h in self.Portfolio.Values if h.Invested]
@@ -144,7 +238,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
             f"Equity: ${self.Portfolio.TotalPortfolioValue:.2f}"
         )
 
-    def on_order_event(self, order_event: OrderEvent) -> None:
+    def OnOrderEvent(self, order_event: OrderEvent) -> None:
         """订单事件回调"""
         if order_event.Status == OrderStatus.Filled:
             direction = "SHORT" if order_event.FillQuantity < 0 else "COVER"
@@ -153,7 +247,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
                 f"Qty={order_event.FillQuantity:.4f} @ ${order_event.FillPrice:.4f}"
             )
 
-    def on_end_of_algorithm(self) -> None:
+    def OnEndOfAlgorithm(self) -> None:
         """策略结束回调"""
         self.Debug("=" * 60)
         self.Debug("Altcoin Short Strategy Completed")

@@ -12,124 +12,7 @@ class AltcoinFuturesUniverseSelectionModel(ManualUniverseSelectionModel):
     """
 
     def __init__(self):
-        tickers = [
-            # Top Layer 1s
-            "BNBUSDT",
-            "XRPUSDT",
-            "ADAUSDT",
-            "SOLUSDT",
-            "DOTUSDT",
-            "MATICUSDT",
-            "LTCUSDT",
-            "AVAXUSDT",
-            "TRXUSDT",
-            "SHIBUSDT",
-            # Layer 2s
-            "OPUSDT",
-            "ARBUSDT",
-            "IMXUSDT",
-            "MANTLEUSDT",
-            # Newer High Cap
-            "APTUSDT",
-            "SUIUSDT",
-            "SEIUSDT",
-            "TIAUSDT",
-            "EOSUSDT",
-            "NEARUSDT",
-            "ATOMUSDT",
-            "ETCUSDT",
-            "XLMUSDT",
-            "FILUSDT",
-            "HBARUSDT",
-            "VETUSDT",
-            "ICPUSDT",
-            "INJUSDT",
-            "RUNEUSDT",
-            "STXUSDT",
-            # DeFi Blue Chips
-            "LINKUSDT",
-            "UNIUSDT",
-            "AAVEUSDT",
-            "MKRUSDT",
-            "SNXUSDT",
-            "CRVUSDT",
-            "LDOUSDT",
-            "FXSUSDT",
-            "RPLUSDT",
-            "COMPUSDT",
-            "1INCHUSDT",
-            "YFIUSDT",
-            "SUSHIUSDT",
-            "BALUSDT",
-            "ZRXUSDT",
-            "CVXUSDT",
-            # Gaming / Metaverse
-            "AXSUSDT",
-            "SANDUSDT",
-            "MANAUSDT",
-            "GALAUSDT",
-            "APEUSDT",
-            "ENJUSDT",
-            "ILVUSDT",
-            "BEAMUSDT",
-            # Infrastructure
-            "GRTUSDT",
-            "RNDRUSDT",
-            "FETUSDT",
-            "AGIXUSDT",
-            "OCEANUSDT",
-            "JASMYUSDT",
-            "ANKRUSDT",
-            "LPTUSDT",
-            # Older Gen
-            "BCHUSDT",
-            "ALGOUSDT",
-            "FLOWUSDT",
-            "EGLDUSDT",
-            "XTZUSDT",
-            "CHZUSDT",
-            "KAVAUSDT",
-            "KLAYUSDT",
-            "NEOUSDT",
-            "IOTAUSDT",
-            "DASHUSDT",
-            "ZECUSDT",
-            "XMRUSDT",
-            "QTUMUSDT",
-            "BATUSDT",
-            "LRCUSDT",
-            # Meme & Community
-            "DOGEUSDT",
-            "PEPEUSDT",
-            "BONKUSDT",
-            "FLOKIUSDT",
-            "WIFUSDT",
-            "MEMEUSDT",
-            "ORDIUSDT",
-            "SATSUSDT",
-            # Exchange Tokens
-            "OKBUSDT",
-            "CROUSDT",
-            "KCSUSDT",
-            "GTUSDT",
-            # Others / High Volatility candidates
-            "DYDXUSDT",
-            "GMXUSDT",
-            "WOOUSDT",
-            "CAKEUSDT",
-            "MINAUSDT",
-            "QNTUSDT",
-            "ASTRUSDT",
-            "GLMRUSDT",
-            "ROSEUSDT",
-            "IOTXUSDT",
-            "ONEUSDT",
-            "CELOUSDT",
-            "RVNUSDT",
-            "WAVESUSDT",
-            "AUDIOUSDT",
-            "KDAUSDT",
-        ]
+        tickers = ["BTCUSDT"]
 
         symbols = []
         for ticker in tickers:
@@ -137,6 +20,10 @@ class AltcoinFuturesUniverseSelectionModel(ManualUniverseSelectionModel):
             # 必须指定 Market.Binance
             symbol = Symbol.Create(ticker, SecurityType.CryptoFuture, Market.Binance)
             symbols.append(symbol)
+            # Debug symbol creation
+            print(
+                f"DEBUG: Created Symbol: {symbol} | Type: {symbol.SecurityType} | ID: {symbol.ID}"
+            )
 
         super().__init__(symbols)
 
