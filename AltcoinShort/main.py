@@ -38,9 +38,9 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # 基本设置
         # =====================================================================
         self.SetStartDate(2025, 1, 1)
-        self.SetEndDate(2025, 3, 1)
+        self.SetEndDate(2025, 1, 5)
         self.SetAccountCurrency("USDT")
-        self.SetCash(100000)
+        self.SetCash(100)  # 修改为真实的 100 USDT
 
         # 设置券商模型 - Binance Futures (永续合约)
         self.SetBrokerageModel(BrokerageName.BinanceFutures, AccountType.Margin)
@@ -56,7 +56,10 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # =====================================================================
         # 策略参数
         # =====================================================================
-        MAX_POSITIONS = 30
+        MAX_POSITIONS = (
+            5  # 100 USDT / 5 POS * 2x = 40 USDT/POS 名义价值，确保保证金充足
+        )
+        self._max_positions = MAX_POSITIONS
         LEVERAGE = 2
 
         # =====================================================================
@@ -232,7 +235,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         margin_used = sum(abs(h.HoldingsValue) for h in holdings)
 
         self.Debug(
-            f"[Status] Positions: {len(holdings)}/30 | "
+            f"[Status] Positions: {len(holdings)}/{self._max_positions} | "
             f"PnL: ${total_pnl:.2f} | "
             f"Margin: ${margin_used:.2f} | "
             f"Equity: ${self.Portfolio.TotalPortfolioValue:.2f}"

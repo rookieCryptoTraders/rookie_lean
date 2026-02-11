@@ -61,42 +61,26 @@ class SmartSpreadExecutionModel(ExecutionModel):
             holding = algorithm.Portfolio[symbol]
             current_quantity = holding.Quantity
 
-            # 计算目标数量
+            # 获取目标数量（LEAN 的 PCM 已自动根据 Weight 将其转换为具体的币数 Units）
             target_quantity = target.Quantity
 
-            # 如果是百分比形式，转换为实际数量
-            if abs(target_quantity) < 1:
-                portfolio_value = algorithm.Portfolio.TotalPortfolioValue
-                target_value = portfolio_value * abs(target_quantity)
-                price = security.Price
-
-                if price > 0:
-                    target_quantity = (
-                        -target_value / price
-                        if target_quantity < 0
-                        else target_value / price
-                    )
-                else:
-                    continue
-
-            # 计算需要交易的数量
+            # 计算需要交易的差额（增量）
             quantity_to_trade = target_quantity - current_quantity
-
-            # 最小交易价值检查
-            min_trade_value = 5.0
-            trade_value = abs(quantity_to_trade * security.Price)
-
-            if trade_value < min_trade_value:
-                # 移除已满足的 target
-                self.targets_collection.Remove(symbol)
-                if symbol in self.target_first_seen:
-                    del self.target_first_seen[symbol]
-                continue
 
             # =========================================================
             # 核心逻辑：判断是入场还是出场
             # =========================================================
             is_closing = self._is_closing_position(current_quantity, quantity_to_trade)
+
+            # 最小交易价值检查（仅对入场生效，平仓必须执行）
+            if not is_closing:
+                min_trade_value = 5.0
+                trade_value = abs(quantity_to_trade * security.Price)
+                if trade_value < min_trade_value:
+                    self.targets_collection.Remove(symbol)
+                    if symbol in self.target_first_seen:
+                        del self.target_first_seen[symbol]
+                    continue
 
             if is_closing:
                 # =====================================================

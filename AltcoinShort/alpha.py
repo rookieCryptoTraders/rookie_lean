@@ -143,6 +143,7 @@ class AltcoinShortAlphaModel(AlphaModel):
 
         # 生成做空 Insights (带有权重)
         # 权重 = selection_weight (基于下行波动率偏好)
+        raw_insights = []
         for symbol in candidates:
             vol_data = self.coin_data.get(symbol, {})
             weight = vol_data.get("selection_weight", 0.0)
@@ -166,7 +167,11 @@ class AltcoinShortAlphaModel(AlphaModel):
             # 附加波动率数据到 insight 的 tag
             insight.Tag = f"down_vol:{vol_data.get('downward_vol', 0):.2f}|up_vol:{vol_data.get('upward_vol', 0):.2f}"
 
-            insights.append(insight)
+            raw_insights.append((weight, insight))
+
+        # 按权重降序排列，只取前 max_positions 个信号
+        raw_insights.sort(key=lambda x: x[0], reverse=True)
+        insights = [ins for _, ins in raw_insights[: self.max_positions]]
 
         return insights
 
