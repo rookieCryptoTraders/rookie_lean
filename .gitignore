@@ -29,3 +29,4 @@ backtests/
 cli_commands
 backtests/
 **/lean.json
+backtest

@@ -3,10 +3,8 @@ import pandas as pd
 from datetime import datetime
 from settings import DATA_DIR
 
-DATA_DIR = "../../../data/cryptofuture/binance/minute"
-
-def load_trade_data(ticker, start_date, end_date):
-    """Efficiently load and concatenate minute data for a ticker."""
+def load_trade_data(ticker, start_date, end_date, interval=None):
+    """Efficiently load and concatenate minute data for a ticker, with optional resampling."""
     ticker_dir = os.path.join(DATA_DIR, ticker.lower())
     if not os.path.exists(ticker_dir):
         print(f"Data directory for {ticker_dir} does not exist.")
@@ -31,11 +29,25 @@ def load_trade_data(ticker, start_date, end_date):
         except Exception as e:
             raise e
 
-    return pd.concat(all_dfs).sort_index().drop_duplicates()
+    if not all_dfs:
+        return None
+
+    df = pd.concat(all_dfs).sort_index().drop_duplicates()
+    
+    if interval:
+        df = df.resample(interval).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum"
+        }).dropna()
+        
+    return df
 
 
-def load_quote_data(ticker, start_date, end_date):
-    """Efficiently load and concatenate minute quote data for a ticker."""
+def load_quote_data(ticker, start_date, end_date, interval=None):
+    """Efficiently load and concatenate minute quote data for a ticker, with optional resampling."""
     ticker_dir = os.path.join(DATA_DIR, ticker.lower())
     if not os.path.exists(ticker_dir):
         print(f"Data directory for {ticker_dir} does not exist.")
@@ -60,4 +72,24 @@ def load_quote_data(ticker, start_date, end_date):
             all_dfs.append(
                 df[["bid_open", "bid_high", "bid_low", "bid_close", "bid_size", "ask_open", "ask_high", "ask_low", "ask_close", "ask_size"]]
             )
-    return pd.concat(all_dfs).sort_index().drop_duplicates()
+    
+    if not all_dfs:
+        return None
+
+    df = pd.concat(all_dfs).sort_index().drop_duplicates()
+
+    if interval:
+        df = df.resample(interval).agg({
+            "bid_open": "first",
+            "bid_high": "max",
+            "bid_low": "min",
+            "bid_close": "last",
+            "bid_size": "sum",
+            "ask_open": "first",
+            "ask_high": "max",
+            "ask_low": "min",
+            "ask_close": "last",
+            "ask_size": "sum"
+        }).dropna()
+
+    return df
