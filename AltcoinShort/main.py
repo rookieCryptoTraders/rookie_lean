@@ -4,6 +4,8 @@ from AlgorithmImports import *
 # 导入自定义模块
 from alpha import AltcoinShortAlphaModel
 from execution import SmartSpreadExecutionModel
+from risk import DynamicExitRiskModel
+from portfolio import EnterAndHoldPCM
 # endregion
 
 
@@ -37,10 +39,10 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # =====================================================================
         # 基本设置
         # =====================================================================
-        self.SetStartDate(2025, 1, 1)
-        self.SetEndDate(2025, 1, 5)
+        self.SetStartDate(2025, 10, 20)
+        self.SetEndDate(2026, 2, 1)
         self.SetAccountCurrency("USDT")
-        self.SetCash(100)  # 修改为真实的 100 USDT
+        self.SetCash(100000)  # 100k USDT
 
         # 设置券商模型 - Binance Futures (永续合约)
         self.SetBrokerageModel(BrokerageName.BinanceFutures, AccountType.Margin)
@@ -56,9 +58,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # =====================================================================
         # 策略参数
         # =====================================================================
-        MAX_POSITIONS = (
-            5  # 100 USDT / 5 POS * 2x = 40 USDT/POS 名义价值，确保保证金充足
-        )
+        MAX_POSITIONS = 5  # 100k / 5 = 20k per pos * 2x = 40k exposure
         self._max_positions = MAX_POSITIONS
         LEVERAGE = 2
 
@@ -75,37 +75,42 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         self.SetAlpha(
             AltcoinShortAlphaModel(
                 max_positions=MAX_POSITIONS,
-                volatility_lookback_hours=168,  # 7 天
-                volatility_cache_hours=6,
+                volatility_lookback_hours=168,  # 7 days lookback
+                volatility_cache_hours=6,  # Refresh every 6h
                 selection_weight_power=1.5,
-                max_adverse_vol_ratio=2.0,
-                insight_duration_hours=24,
+                max_adverse_vol_ratio=3.0,  # Relaxed from 2.0 (IC report §8.3)
+                insight_duration_hours=48,  # Extended from 24h (downward_vol peaks at 48h)
             )
         )
 
-        # 2. Portfolio Construction Model - 使用官方模型
-        # 它会自动根据 Insight.Weight 来分配仓位
-        # 如果所有 Weight 之和 > 1，它会自动归一化
-        # rebalance=Resolution.Hour: 每小时重新平衡一次
-        # (RebalanceOnInsightChanges 和 RebalanceOnSecurityChanges 已通过 Settings 禁用)
+        # 2. Portfolio Construction Model - Enter-and-Hold
+        # 固定仓位大小, 只开新仓不调仓, 出场由 Risk Model 控制
         self.SetPortfolioConstruction(
-            InsightWeightingPortfolioConstructionModel(Resolution.Hour)
+            EnterAndHoldPCM(
+                max_positions=MAX_POSITIONS,
+                leverage=LEVERAGE,
+            )
         )
 
-        # 3. Risk Management Model - 使用标准模型组合
-        # 策略：多层风控体系
+        # 3. Risk Management Model - 动态出场风控
+        # 策略：自定义模型 + 全局熔断
 
-        # A. 移动止损 (锁定利润) - 5% 回调
-        # 自动适配方向：
-        # - 多头 (Long): 从最高价回撤 5% 平仓
-        # - 空头 (Short): 从最低价反弹 5% 平仓
-        self.AddRiskManagement(TrailingStopRiskManagementModel(0.05))
+        # A. 动态出场模型 (替代标准 TrailingStop + MaxDDPerSecurity)
+        #    - Flash Crash TP: ≤4h 浮盈>8% → 减仓50%
+        #    - Dynamic Trailing: 最大浮盈>10% → trailing 5%收紧至2%
+        #    - Hard Stop: 亏损>10% → 全平
+        self.AddRiskManagement(
+            DynamicExitRiskModel(
+                flash_tp_threshold=0.08,
+                flash_tp_hours=4.0,
+                trailing_default=0.05,
+                trailing_tight=0.02,
+                tight_threshold=0.10,
+                hard_stop=0.10,
+            )
+        )
 
-        # B. 个股硬止损 (防止单币种爆仓) - 10% 绝对亏损
-        # 作为最后一道防线，防止单笔交易造成过大损失
-        self.AddRiskManagement(MaximumDrawdownPercentPerSecurity(0.10))
-
-        # C. 全局熔断 (防止系统性风险) - 15% 总资金回撤
+        # B. 全局熔断 (防止系统性风险) - 15% 总资金回撤
         # 当总权益回撤超过 15% 时，平掉所有仓位，防止账户爆仓
         self.AddRiskManagement(MaximumDrawdownPercentPortfolio(0.15))
 
@@ -131,7 +136,9 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         self.Debug("=" * 60)
         self.Debug("Altcoin Short Strategy Initialized")
         self.Debug(f"Max Positions: {MAX_POSITIONS} | Leverage: {LEVERAGE}x")
-        self.Debug("Using Standard Risk Models (0.05 MaxDD / 0.05 MaxProfit)")
+        self.Debug(
+            "Using DynamicExitRiskModel (FlashTP=8%/4h | Trail=5%→2% | HardStop=10%)"
+        )
         self.Debug("=" * 60)
 
     def _add_crypto_futures(self, leverage: int = 2) -> None:
@@ -161,7 +168,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
             "SUIUSDT",
             "SEIUSDT",
             "TIAUSDT",
-            "EOSUSDT",
+            # "EOSUSDT",  # no trade data available
             "NEARUSDT",
             "ATOMUSDT",
             "ETCUSDT",
@@ -208,11 +215,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         added_count = 0
         for ticker in tickers:
             try:
-                # AddCryptoFuture 是添加永续合约的标准 API
-                # 它会自动：
-                # 1. 设置正确的 SecurityType (CryptoFuture)
-                # 2. 配置正确的数据路径 (cryptofuture/binance/...)
-                # 3. 设置合约属性 (保证金、手续费等)
+                # AddCryptoFuture: 添加永续合约，使用分钟级K线数据
                 crypto_future = self.AddCryptoFuture(
                     ticker,
                     Resolution.Minute,
@@ -220,6 +223,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
                     fillForward=True,
                     leverage=leverage,
                 )
+
                 added_count += 1
                 self.Debug(f"[Init] Added CryptoFuture: {ticker}")
             except Exception as e:

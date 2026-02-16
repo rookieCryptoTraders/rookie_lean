@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# LEAN / QuantConnect
+backtests/
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Research outputs
+research/*.csv
+research/*.log

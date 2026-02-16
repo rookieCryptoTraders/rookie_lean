@@ -1,7 +1,15 @@
 {
     "algorithm-language": "Python",
-    "parameters": {},
-    "description": "Altcoin Short Strategy - 做空市值排名 15-300 的 Altcoin",
-    "cloud-id": null,
-    "local-id": null
+    "parameters": {
+        "algorithm-type-name": "AltcoinShortAlgorithm",
+        "algorithm-location": "AltcoinShort/main.py",
+        "data-folder": "/Users/chenzhao/Documents/lean_workspace/data",
+        "debugging": true,
+        "debugging-method": "LocalCmdline",
+        "log-handler": "QuantConnect.Logging.CompositeLogHandler",
+        "messaging-handler": "QuantConnect.Messaging.Messaging",
+        "job-queue-handler": "QuantConnect.Queues.JobQueue",
+        "api-handler": "QuantConnect.Api.Api"
+    },
+    "local-id": 855366690
 }
