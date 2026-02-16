@@ -16,6 +16,7 @@ This workspace is set up for algorithmic trading on Binance using the QuantConne
 ## How to Run
 
 ### 1. Backtesting (Docker)
+set -a; source .env; set +a
 To run a backtest for the `BinanceBot` project:
 ```bash
 source venv/bin/activate
