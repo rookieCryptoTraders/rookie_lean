@@ -13,6 +13,7 @@ data/**/*.csv
 
 # Environment
 .env
+lean.json
 
 # OS
 .DS_Store
