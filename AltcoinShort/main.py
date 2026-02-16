@@ -47,6 +47,13 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # 设置券商模型 - Binance Futures (永续合约)
         self.SetBrokerageModel(BrokerageName.BinanceFutures, AccountType.Margin)
 
+        # 设置基准 - 显式指定为 Binance 的 BTCUSDT 永续合约
+        # 避免字符串歧义，直接使用 Symbol 对象
+        btc_benchmark = Symbol.Create(
+            "BTCUSDT", SecurityType.CryptoFuture, Market.Binance
+        )
+        self.SetBenchmark(btc_benchmark)
+
         # =====================================================================
         # 重要：禁用 Insight/Security 变化时的自动重平衡
         # 只在定时器触发时重平衡 (每小时一次)
@@ -56,11 +63,36 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         self.Settings.RebalancePortfolioOnSecurityChanges = False
 
         # =====================================================================
-        # 策略参数
+        # 策略参数 — 通过 GetParameter 读取, 支持 lean optimize 调参
+        # config.json 中以字符串形式定义默认值
         # =====================================================================
-        MAX_POSITIONS = 5  # 100k / 5 = 20k per pos * 2x = 40k exposure
+        MAX_POSITIONS = int(self.GetParameter("max-positions", 5))
+        LEVERAGE = int(self.GetParameter("leverage", 2))
         self._max_positions = MAX_POSITIONS
-        LEVERAGE = 2
+
+        # ── Alpha 参数 ──
+        insight_duration_hours = int(self.GetParameter("insight-duration-hours", 48))
+        volatility_lookback_hours = int(
+            self.GetParameter("volatility-lookback-hours", 168)
+        )
+        volatility_cache_hours = int(self.GetParameter("volatility-cache-hours", 6))
+        selection_weight_power = float(self.GetParameter("selection-weight-power", 1.5))
+        max_adverse_vol_ratio = float(self.GetParameter("max-adverse-vol-ratio", 3.0))
+        co_lookback = int(self.GetParameter("co-lookback", 24))
+        co_decay = float(self.GetParameter("co-decay", 0.95))
+
+        # ── Risk 参数 ──
+        flash_tp_threshold = float(self.GetParameter("flash-tp-threshold", 0.08))
+        flash_tp_hours = float(self.GetParameter("flash-tp-hours", 4.0))
+        trailing_default = float(self.GetParameter("trailing-default", 0.05))
+        trailing_tight = float(self.GetParameter("trailing-tight", 0.02))
+        tight_threshold = float(self.GetParameter("tight-threshold", 0.10))
+        hard_stop = float(self.GetParameter("hard-stop", 0.10))
+        portfolio_max_dd = float(self.GetParameter("portfolio-max-dd", 0.15))
+
+        # ── Execution 参数 ──
+        max_spread_percent = float(self.GetParameter("max-spread-percent", 0.005))
+        max_wait_hours = float(self.GetParameter("max-wait-hours", 1.0))
 
         # =====================================================================
         # 添加 Crypto Futures - 使用 AddCryptoFuture
@@ -75,16 +107,17 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         self.SetAlpha(
             AltcoinShortAlphaModel(
                 max_positions=MAX_POSITIONS,
-                volatility_lookback_hours=168,  # 7 days lookback
-                volatility_cache_hours=6,  # Refresh every 6h
-                selection_weight_power=1.5,
-                max_adverse_vol_ratio=3.0,  # Relaxed from 2.0 (IC report §8.3)
-                insight_duration_hours=48,  # Extended from 24h (downward_vol peaks at 48h)
+                volatility_lookback_hours=volatility_lookback_hours,
+                volatility_cache_hours=volatility_cache_hours,
+                selection_weight_power=selection_weight_power,
+                max_adverse_vol_ratio=max_adverse_vol_ratio,
+                insight_duration_hours=insight_duration_hours,
+                co_lookback=co_lookback,
+                co_decay=co_decay,
             )
         )
 
         # 2. Portfolio Construction Model - Enter-and-Hold
-        # 固定仓位大小, 只开新仓不调仓, 出场由 Risk Model 控制
         self.SetPortfolioConstruction(
             EnterAndHoldPCM(
                 max_positions=MAX_POSITIONS,
@@ -93,34 +126,25 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         )
 
         # 3. Risk Management Model - 动态出场风控
-        # 策略：自定义模型 + 全局熔断
-
-        # A. 动态出场模型 (替代标准 TrailingStop + MaxDDPerSecurity)
-        #    - Flash Crash TP: ≤4h 浮盈>8% → 减仓50%
-        #    - Dynamic Trailing: 最大浮盈>10% → trailing 5%收紧至2%
-        #    - Hard Stop: 亏损>10% → 全平
         self.AddRiskManagement(
             DynamicExitRiskModel(
-                flash_tp_threshold=0.08,
-                flash_tp_hours=4.0,
-                trailing_default=0.05,
-                trailing_tight=0.02,
-                tight_threshold=0.10,
-                hard_stop=0.10,
+                flash_tp_threshold=flash_tp_threshold,
+                flash_tp_hours=flash_tp_hours,
+                trailing_default=trailing_default,
+                trailing_tight=trailing_tight,
+                tight_threshold=tight_threshold,
+                hard_stop=hard_stop,
             )
         )
 
-        # B. 全局熔断 (防止系统性风险) - 15% 总资金回撤
-        # 当总权益回撤超过 15% 时，平掉所有仓位，防止账户爆仓
-        self.AddRiskManagement(MaximumDrawdownPercentPortfolio(0.15))
+        # 全局熔断
+        self.AddRiskManagement(MaximumDrawdownPercentPortfolio(portfolio_max_dd))
 
         # 4. Execution Model - 智能价差执行
-        # 入场时检查 spread (最大 0.5%)，超时 1 小时放弃
-        # 出场时立即执行，不管滑点
         self.SetExecution(
             SmartSpreadExecutionModel(
-                max_spread_percent=0.005,  # 0.5% 最大可接受价差
-                max_wait_hours=1.0,  # 最长等待 1 小时
+                max_spread_percent=max_spread_percent,
+                max_wait_hours=max_wait_hours,
             )
         )
 
@@ -134,10 +158,15 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         )
 
         self.Debug("=" * 60)
-        self.Debug("Altcoin Short Strategy Initialized")
-        self.Debug(f"Max Positions: {MAX_POSITIONS} | Leverage: {LEVERAGE}x")
+        self.Debug("Altcoin Short Strategy Initialized (Parameterized)")
         self.Debug(
-            "Using DynamicExitRiskModel (FlashTP=8%/4h | Trail=5%→2% | HardStop=10%)"
+            f"Positions: {MAX_POSITIONS} | Leverage: {LEVERAGE}x | Duration: {insight_duration_hours}h"
+        )
+        self.Debug(
+            f"Alpha: vol_lookback={volatility_lookback_hours}h | weight_pow={selection_weight_power} | co_lookback={co_lookback}"
+        )
+        self.Debug(
+            f"Risk: flash_tp={flash_tp_threshold:.0%} | trail={trailing_default:.0%}→{trailing_tight:.0%} | stop={hard_stop:.0%} | fuse={portfolio_max_dd:.0%}"
         )
         self.Debug("=" * 60)
 

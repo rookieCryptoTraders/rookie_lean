@@ -9,7 +9,25 @@
         "log-handler": "QuantConnect.Logging.CompositeLogHandler",
         "messaging-handler": "QuantConnect.Messaging.Messaging",
         "job-queue-handler": "QuantConnect.Queues.JobQueue",
-        "api-handler": "QuantConnect.Api.Api"
+        "api-handler": "QuantConnect.Api.Api",
+        "max-positions": "5",
+        "leverage": "2",
+        "insight-duration-hours": "48",
+        "volatility-lookback-hours": "168",
+        "volatility-cache-hours": "6",
+        "selection-weight-power": "1.5",
+        "max-adverse-vol-ratio": "3.0",
+        "co-lookback": "24",
+        "co-decay": "0.95",
+        "flash-tp-threshold": "0.08",
+        "flash-tp-hours": "4.0",
+        "trailing-default": "0.05",
+        "trailing-tight": "0.02",
+        "tight-threshold": "0.10",
+        "hard-stop": "0.10",
+        "portfolio-max-dd": "0.15",
+        "max-spread-percent": "0.005",
+        "max-wait-hours": "1.0"
     },
     "local-id": 855366690
 }
