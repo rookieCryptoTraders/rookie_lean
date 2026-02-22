@@ -15,6 +15,7 @@ load_dotenv()
 
 # Root directory for all data storage
 DATA_LOCATION = os.path.join("../",os.getenv("DATA_RELATIVE_LOCATION", "data"))
+BASE_DATA_PATH = DATA_LOCATION
 
 # Asset class subdirectory
 ASSET_CLASS = "cryptofuture"

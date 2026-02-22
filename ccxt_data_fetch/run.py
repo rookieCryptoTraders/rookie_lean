@@ -1,7 +1,7 @@
 import logging
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, time, timezone, timedelta
 from ccxt_data_fetch.config import START_DATE, END_DATE, DATA_LOCATION, TOP_N_SYMBOL
 from ccxt_data_fetch.utils import get_top_200_symbols, format_symbol
 from ccxt_data_fetch.fetcher import (
@@ -15,6 +15,9 @@ from ccxt_data_fetch.fetcher import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+# datetime set time zone to UTC
+os.environ['TZ'] = 'UTC'
+time.tzset()
 
 def run_fetch(asset_class, resolution, tick_type="trade"):
     start_dt = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)

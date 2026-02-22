@@ -9,8 +9,8 @@ import requests
 import io
 from datetime import date, datetime, timezone, timedelta
 from tqdm import tqdm
-from ccxt_data_fetch.config import DATA_LOCATION, PROXIES
-from ccxt_data_fetch.utils import format_symbol, get_ms_from_midnight
+from config import DATA_LOCATION, PROXIES
+from utils import format_symbol, get_ms_from_midnight
 
 logger = logging.getLogger(__name__)
 
@@ -120,39 +120,33 @@ def fetch_funding_rates(symbol, since_ms, until_ms):
     pbar.close()
     return all_rates
 
-def fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, step_ms=30000, margin_type="um", data_source="binancevision"):
+def fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, margin_type="um", data_source="binancevision"):
     """fetch order book snapshots for crypto futures from [BinanceVision](https://data.binance.vision/?prefix=data/futures/margin_type/daily/bookDepth/)
+    depth data has no resolution parameter, and is always about 30s interval snapshots. you should align the timestamps to the nearest next minute boundary (e.g., 60s) to ensure consistency, and fill missing snapshots at the start of the day if needed to ensure continuity at midnight.
     
-    :note: data is 30s interval snapshots by default.
-    :param step_ms: (int) The interval to align snapshots to. Default 30000 (30s).
-    
-    :return: (list)
-    
+    :return: (pd.DataFrame)
     """
+
     if data_source != "binancevision":
         raise NotImplementedError("Only binancevision data source is supported for depth data.")
 
-    all_data = []
-    current_since = since_ms
-    last_snapshots = []
-    
-    # Track processed dates to avoid re-downloading same daily file
+    all_dfs_dict = {}
     processed_dates = set()
-    
+    current_since = since_ms - 24*60*60*1000 # start from the previous day to fill the 0:00 snapshot of since_ms
+        
     pbar = tqdm(total=until_ms - since_ms, desc=f"Fetching Depth {symbol}")
-    
+
     while current_since < until_ms:
         dt = datetime.fromtimestamp(current_since / 1000, tz=timezone.utc)
         date_str = dt.strftime("%Y-%m-%d")
+        date_str_yyyymmdd = dt.strftime("%Y%m%d")
         
         if date_str in processed_dates:
-            # Advance to next day start to avoid infinite loop
             next_day = (dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
             current_since = int(next_day.timestamp() * 1000)
             continue
             
         formatted_symbol = format_symbol(symbol).upper()
-        # Correct URL pattern: includes symbol subdirectory
         url = f"https://data.binance.vision/data/futures/{margin_type}/daily/bookDepth/{formatted_symbol}/{formatted_symbol}-bookDepth-{date_str}.zip"
         
         try:
@@ -161,74 +155,9 @@ def fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, step_ms=30000, ma
                 with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
                     csv_name = zf.namelist()[0]
                     with zf.open(csv_name) as f:
-                        # Use low_memory=False to avoid DtypeWarning
                         df = pd.read_csv(f, low_memory=False)
+                        all_dfs_dict[date_str_yyyymmdd] = df
                         
-                        # Sample data columns: timestamp,percentage,depth,notional
-                        if 'timestamp' in df.columns:
-                            df['dt'] = pd.to_datetime(df['timestamp'])
-                            if df['dt'].dt.tz is None:
-                                df['dt'] = df['dt'].dt.tz_localize('UTC')
-                            
-                            # Convert to milliseconds since epoch robustly
-                            epoch = pd.Timestamp("1970-01-01", tz='UTC')
-                            df['ms_original'] = (df['dt'] - epoch) // pd.Timedelta(milliseconds=1)
-                            
-                            # Filter out "30s" snapshots if we only want minute data (step_ms=60000)
-                            # User instruction: "if the timestamp is 30s, drop them."
-                            if step_ms == 60000:
-                                df = df[((df['ms_original'] // 1000) % 60) < 30].copy()
-
-                            # Align to the nearest step_ms boundary
-                            # We use round to ensure snapshots close to the boundary are mapped correctly
-                            if step_ms > 0:
-                                df['ms'] = (np.round(df['ms_original'] / step_ms) * step_ms).astype(int)
-                            else:
-                                df['ms'] = df['ms_original']
-                            
-                            # Filter by range [since_ms, until_ms)
-                            # We filter the ALIGNED timestamp to ensure the data is "valid" for this backtest range
-                            mask = (df['ms'] >= since_ms) & (df['ms'] < until_ms)
-                            df_filtered = df.loc[mask].copy()
-                            
-                            if not df_filtered.empty:
-                                # Deduplication: if multiple snapshots round to the same ms, take the latest one
-                                # Percentage is part of the snapshot structure
-                                df_filtered = df_filtered.sort_values(['ms', 'ms_original'])
-                                
-                                # Find the latest original timestamp for each bucket
-                                latest_original = df_filtered.groupby('ms')['ms_original'].max()
-                                df_filtered = df_filtered[df_filtered['ms_original'] == df_filtered['ms'].map(latest_original)]
-                                
-                                # Final safety drop duplicates (in case ms_original itself is repeated)
-                                df_filtered = df_filtered.drop_duplicates(['ms', 'percentage'], keep='last')
-                                
-                                # Add ms_midnight column (milliseconds since midnight UTC)
-                                # This aligns with LEAN's expectations for minute/second resolution data
-                                df_filtered['dt_aligned'] = pd.to_datetime(df_filtered['ms'], unit='ms', utc=True)
-                                df_filtered['ms_midnight'] = df_filtered['dt_aligned'].apply(get_ms_from_midnight)
-                                
-                                # Convert to list of dicts for return
-                                records = df_filtered.to_dict('records')
-                                
-                                # If we have data from previous day, fill the beginning of the current day
-                                # to ensure continuity if there's a gap at midnight.
-                                day_start_ms = int(dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                                first_ms_in_day = df_filtered['ms'].min()
-                                
-                                if last_snapshots and first_ms_in_day > day_start_ms:
-                                    fill_records = []
-                                    for snap in last_snapshots:
-                                        fill_snap = snap.copy()
-                                        fill_snap['ms'] = day_start_ms
-                                        fill_records.append(fill_snap)
-                                    all_data.extend(fill_records)
-
-                                all_data.extend(records)
-                                
-                                # Update last_snapshots for the next day's gap filling
-                                max_ms = df_filtered['ms'].max()
-                                last_snapshots = [r for r in records if r['ms'] == max_ms]
             elif response.status_code == 404:
                 logger.debug(f"No depth data for {symbol} on {date_str} (404)")
             else:
@@ -237,52 +166,270 @@ def fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, step_ms=30000, ma
             logger.error(f"Error fetching depth data for {symbol} on {date_str}: {e}")
             
         processed_dates.add(date_str)
-        # Move current_since to next day start
         next_day = (dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
         new_since = int(next_day.timestamp() * 1000)
         
-        # Update progress bar
         progress = new_since - current_since
         if progress > 0:
             pbar.update(min(progress, until_ms - current_since))
-        
         current_since = new_since
 
     pbar.close()
-    return all_data
+    if not all_dfs_dict:
+        return {}
+    return all_dfs_dict
 
 
-def save_depth_data(symbol, depth_data, asset_class="cryptofuture"):
+def save_depth_data(symbol,date_str:str, depth_data:pd.DataFrame, asset_class="cryptofuture"):
     """
     Save depth data to LEAN format.
     Format: ms_midnight, percentage, depth, notional
     """
-    if not depth_data:
+    if depth_data.empty:
         return
     df = pd.DataFrame(depth_data)
-    df["dt"] = pd.to_datetime(df["ms"], unit="ms", utc=True)
-    df["date_str"] = df["dt"].dt.strftime("%Y%m%d")
 
     formatted_symbol = format_symbol(symbol)
     symbol_dir = os.path.join(
-        DATA_LOCATION, asset_class, "binance", "depth", formatted_symbol
+        DATA_LOCATION, asset_class, "binance", "minute", formatted_symbol
     )
     os.makedirs(symbol_dir, exist_ok=True)
 
-    for date_str, group in df.groupby("date_str"):
-        # LEAN depth format: ms_midnight, percentage, depth, notional
-        group = group.sort_values(["ms", "percentage"])
-        group["ms_midnight"] = group["dt"].apply(get_ms_from_midnight)
+    # LEAN depth format: ms_midnight, percentage, depth, notional
+    df["timestamp"]=pd.to_datetime(df["timestamp"], utc=True)
+    df["ms_midnight"] = df["timestamp"].apply(get_ms_from_midnight)
 
-        # Filename: YYYYMMDD_depth.zip
-        zip_path = os.path.join(symbol_dir, f"{date_str}_depth.zip")
-        zf_name = f"{date_str}_depth.csv"
+    # Filename: YYYYMMDD_depth.zip
+    zip_path = os.path.join(symbol_dir, f"{date_str}_depth.zip")
+    zf_name = f"{date_str}_depth.csv"
+    
+    lean_df = df[["ms_midnight", "percentage", "depth", "notional"]]
+    csv_content = lean_df.to_csv(index=False, header=False)
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(zf_name, csv_content)
+
+def load_depth_data(symbol: str, date_str: str, pivot=False, ffill=False, align_ms=None, fill_first=True, asset_class="cryptofuture", exchange='binance', resolution="minute"):
+    """
+    Load depth data for a single day.
+    
+    Args:
+        symbol (str): Symbol name (e.g., BTCUSDT)
+        date_str (str): Date string in YYYYMMDD format.
+        pivot (bool): Whether to pivot the data. Defaults to False.
+        ffill (bool): Whether to forward fill missing data. Defaults to False.
+        align_ms (int): Alignment interval in milliseconds. Defaults to None.
+        fill_first (bool): Whether to fill the first snapshot with previous day's last. Defaults to True.
+        asset_class (str): Asset class directory. Defaults to "cryptofuture".
+        exchange (str): Exchange directory. Defaults to 'binance'.
+    """
+    assert resolution == "minute", "Currently only minute resolution is supported for depth data loading."
+    def _load_day_file(d_str):
+        formatted_symbol = format_symbol(symbol)
+        symbol_dir = os.path.join(DATA_LOCATION, asset_class, exchange, "minute", formatted_symbol)
+        zip_path = os.path.join(symbol_dir, f"{d_str}_depth.zip")
         
-        lean_df = group[["ms_midnight", "percentage", "depth", "notional"]]
-        csv_content = lean_df.to_csv(index=False, header=False)
+        if not os.path.exists(zip_path):
+            # Attempt to download
+            if exchange == 'binance' and asset_class == 'cryptofuture':
+                try:
+                    dt_obj = datetime.strptime(d_str, "%Y%m%d").replace(tzinfo=timezone.utc)
+                    since_ms = int(dt_obj.timestamp() * 1000)
+                    until_ms = since_ms + 86400000
+                    depth_data_dict = fetch_depth_range_cryptofuture(symbol, since_ms, until_ms)
+                    if depth_data_dict:
+                        for day_str, day_df in depth_data_dict.items():
+                            save_depth_data(symbol, day_str, day_df, asset_class=asset_class)
+                    
+                    if d_str not in (depth_data_dict or {}):
+                        return pd.DataFrame()
+                except Exception as e:
+                    logger.error(f"Error downloading depth data for {symbol} on {d_str}: {e}")
+                    return pd.DataFrame()
+            else:
+                return pd.DataFrame()
+                
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                csv_name = f"{d_str}_depth.csv"
+                if csv_name in zf.namelist():
+                    with zf.open(csv_name) as f:
+                        df=pd.read_csv(f, names=["ms_midnight", "percentage", "depth", "notional"])
+                        # df['ms_original'] = df['ms_midnight']+datetime.strptime(d_str, "%Y%m%d").timestamp()*1000
+                        return df
+        except Exception as e:
+            logger.error(f"Error reading depth data file {zip_path}: {e}")
+            return pd.DataFrame()
+        return pd.DataFrame()
 
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(zf_name, csv_content)
+    df = _load_day_file(date_str)
+    
+    if fill_first:
+        prev_date = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+        prev_df = _load_day_file(prev_date)
+        if not prev_df.empty:
+            last_ms = prev_df['ms_midnight'].max()
+            last_snapshot = prev_df[prev_df['ms_midnight'] == last_ms].copy()
+            last_snapshot['ms_midnight'] = 0
+            df = pd.concat([last_snapshot, df], ignore_index=True)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Initial sort and drop duplicates
+    df = df.sort_values(['ms_midnight', 'percentage']).drop_duplicates(['ms_midnight', 'percentage'], keep='last')
+
+    if align_ms is not None:
+        # Align to the nearest NEXT boundary (ceil)
+        df['ms_midnight'] = (np.ceil(df['ms_midnight'] / align_ms) * align_ms).astype(int)
+        df = df[df['ms_midnight'] < 86400000]
+        df = df.sort_values(['ms_midnight', 'percentage']).drop_duplicates(['ms_midnight', 'percentage'], keep='last')
+        
+        ms_range = np.arange(0, 86400000, align_ms)
+        if pivot:
+            df_depth = df.pivot(index='ms_midnight', columns='percentage', values='depth')
+            df_depth = df_depth.reindex(ms_range)
+            df_depth.columns = [f"depth_{p}%" for p in df_depth.columns]
+            df_notional = df.pivot(index='ms_midnight', columns='percentage', values='notional')
+            df_notional = df_notional.reindex(ms_range)
+            df_notional.columns = [f"notional_{p}%" for p in df_notional.columns]
+            df = pd.concat([df_depth,df_notional],axis=1,join='outer')
+        else:
+            percentages = df['percentage'].unique()
+            new_index = pd.MultiIndex.from_product([ms_range, percentages], names=['ms_midnight', 'percentage'])
+            df = df.set_index(['ms_midnight', 'percentage']).reindex(new_index).reset_index()
+    elif pivot:
+        df_depth = df.pivot(index='ms_midnight', columns='percentage', values='depth')
+        df_depth.columns = [f"depth_{p}%" for p in df_depth.columns]
+        df_notional = df.pivot(index='ms_midnight', columns='percentage', values='notional')
+        df_notional.columns = [f"notional_{p}%" for p in df_notional.columns]
+        df = pd.concat([df_depth,df_notional],axis=1,join='outer')
+
+    if ffill:
+        if pivot:
+            df = df.ffill()
+        else:
+            df = df.sort_values(['percentage', 'ms_midnight'])
+            df[['depth', 'notional']] = df.groupby('percentage')[['depth', 'notional']].ffill()
+            df = df.sort_values(['ms_midnight', 'percentage'])
+
+
+    df = df.reset_index().set_index('ms_midnight')
+        
+    return df
+
+def load_depth_data_range(symbol:str,resolution:str, start:datetime | int, end:datetime | int, pivot=False, ffill=False, align_ms=None, fill_first=True, asset_class="cryptofuture", exchange='binance'):
+    """load depth data from zip wrapped csv data
+
+    Args:
+        symbol (str): Symbol name (e.g., BTCUSDT)
+        resolution (str): Data resolution ('minute', 'hour', 'daily')
+        start (datetime | int): Start timestamp or datetime
+        end (datetime | int): End timestamp or datetime
+        pivot (bool, optional): Whether to pivot the data. Defaults to False.
+        ffill (bool, optional): Whether to forward fill missing data. Defaults to False.
+        align_ms (int, optional): Alignment interval in milliseconds. Defaults to None.
+        fill_first (bool, optional): Whether to fill the first snapshot with previous day's last. Defaults to True.
+        asset_class (str, optional): Asset class directory. Defaults to "cryptofuture".
+        exchange (str, optional): Exchange directory. Defaults to 'binance'.
+    """
+    if isinstance(start, (int, np.integer)):
+        start = datetime.fromtimestamp(start / 1000, tz=timezone.utc)
+    if isinstance(end, (int, np.integer)):
+        end = datetime.fromtimestamp(end / 1000, tz=timezone.utc)
+
+    formatted_symbol = format_symbol(symbol)
+    start_date = start.date()
+    end_date = end.date()
+    
+    all_dfs = []
+    # Load from previous day if fill_first is True to get the last snapshot
+    load_start = start_date - timedelta(days=1) if fill_first else start_date
+    
+    curr = load_start
+    counter=0
+    max_tries=3
+    while curr <= end_date and counter<max_tries:
+        date_str = curr.strftime("%Y%m%d")
+        symbol_dir = os.path.join(DATA_LOCATION, asset_class, exchange, resolution, formatted_symbol)
+        zip_path = os.path.join(symbol_dir, f"{date_str}_depth.zip")
+        
+        if os.path.exists(zip_path):
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                csv_name = f"{date_str}_depth.csv"
+                if csv_name in zf.namelist():
+                    with zf.open(csv_name) as f:
+                        df = pd.read_csv(f, names=["ms_midnight", "percentage", "depth", "notional"])
+                        df['date'] = pd.to_datetime(curr)
+                        all_dfs.append(df)
+            curr += timedelta(days=1)
+            
+        else:
+            logger.debug(f"Depth data file not found: {zip_path}, trying to download {(counter+1)}/{max_tries}")
+            # download data
+            if exchange == 'binance' and asset_class == 'cryptofuture':
+                since_ms = int(datetime.combine(curr, datetime.min.time()).timestamp() * 1000)
+                until_ms = int(datetime.combine(curr + timedelta(days=1), datetime.min.time()).timestamp() * 1000)
+                depth_data_dict = fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, margin_type="um", data_source="binancevision")
+                if depth_data_dict and curr.strftime("%Y%m%d") in depth_data_dict:
+                    save_depth_data(symbol, curr.strftime("%Y%m%d"), depth_data_dict[curr.strftime("%Y%m%d")], asset_class=asset_class)
+            counter+=1
+        
+    if not all_dfs:
+        return pd.DataFrame()
+        
+    df:pd.DataFrame = pd.concat(all_dfs, ignore_index=True)
+    
+    # 0. if fill_first, fill the first datetime with the end of last day's last snapshot
+    if fill_first:
+        prev_day_mask = df['date'].dt.date < start_date
+        if prev_day_mask.any():
+            prev_day_data = df[prev_day_mask]
+            last_ms = prev_day_data['ms_midnight'].max()
+            last_snapshot = prev_day_data[prev_day_data['ms_midnight'] == last_ms].copy()
+            last_snapshot['date'] = pd.to_datetime(start_date)
+            last_snapshot['ms_midnight'] = 0
+            df = pd.concat([last_snapshot, df[df['date'].dt.date >= start_date]], ignore_index=True)
+        else:
+            df = df[df['date'].dt.date >= start_date]
+    else:
+        df = df[df['date'].dt.date >= start_date]
+
+    # 1. if align_ms is provided, align data with an index dataframe with align_ms as index
+    if align_ms is not None:
+        dates = df['date'].unique()
+        ms_range = np.arange(0, 86400000, align_ms)
+        if pivot:
+            df = df.pivot_table(index=['date', 'ms_midnight'], columns='percentage', values='depth')
+            new_index = pd.MultiIndex.from_product([dates, ms_range], names=['date', 'ms_midnight'])
+            df = df.reindex(new_index)
+        else:
+            percentages = df['percentage'].unique()
+            new_index = pd.MultiIndex.from_product([dates, ms_range, percentages], names=['date', 'ms_midnight', 'percentage'])
+            df = df.set_index(['date', 'ms_midnight', 'percentage']).reindex(new_index).reset_index()
+
+    # 2. if pivot, pivot with index=ms_midnight, columns=percentage, values=depth
+    if pivot and not isinstance(df.index, pd.MultiIndex):
+        df = df.pivot_table(index=['date', 'ms_midnight'], columns='percentage', values='depth')
+
+    # 3. if ffill and not pivot, ffill data with groupby('percentage'); if ffill and pivot, then ffill with groupby(level=0)
+    if ffill:
+        if pivot:
+            df = df.groupby(level=0).ffill()
+        else:
+            df = df.sort_values(['percentage', 'date', 'ms_midnight'])
+            df[['depth', 'notional']] = df.groupby('percentage')[['depth', 'notional']].ffill()
+
+    # 4. only keep resolution aligned data (e.g., if resolution is minute, only keep data with ms_midnight aligned to minute boundary)
+    res_map = {"minute": 60000, "hour": 3600000, "daily": 86400000}
+    target_ms = res_map.get(resolution)
+    if target_ms:
+        if pivot:
+            df = df[df.index.get_level_values('ms_midnight') % target_ms == 0]
+        else:
+            df = df[df['ms_midnight'] % target_ms == 0]
+            
+    return df
 
 
 def get_lean_df(df, asset_class, tick_type, time_col):
@@ -319,95 +466,62 @@ def get_lean_df(df, asset_class, tick_type, time_col):
     return df[[time_col, "open", "high", "low", "close", "volume"]]
 
 
-def save_daily_data(symbol, ohlcv_data, asset_class="cryptofuture", tick_type="trade"):
+def save_ohlcv_data(symbol, ohlcv_data, resolution, asset_class="cryptofuture", tick_type="trade"):
+    """
+    Unified function to save OHLCV data to LEAN format for any resolution.
+    """
+    assert resolution in ["minute", "hour", "daily"], "Unsupported resolution for OHLCV saving"
     if not ohlcv_data:
         return
+        
     df = pd.DataFrame(
         ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
     df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
     df["dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    # LEAN Daily format: YYYYMMDD 00:00
-    df["formatted_time"] = df["dt"].dt.strftime("%Y%m%d 00:00")
-
+    
     formatted_symbol = format_symbol(symbol)
-    base_dir = os.path.join(DATA_LOCATION, asset_class, "binance", "daily")
-    os.makedirs(base_dir, exist_ok=True)
+    base_dir = os.path.join(DATA_LOCATION, asset_class, "binance", resolution)
+    
+    if resolution in ["minute", "second", "tick"]:
+        # Daily partitioned files in symbol subdirectory
+        symbol_dir = os.path.join(base_dir, formatted_symbol)
+        os.makedirs(symbol_dir, exist_ok=True)
+        
+        df["date_str"] = df["dt"].dt.strftime("%Y%m%d")
+        for date_str, group in df.groupby("date_str"):
+            group = group.copy()
+            group["time_val"] = group["dt"].apply(get_ms_from_midnight)
+            lean_df = get_lean_df(group, asset_class, tick_type, "time_val")
 
-    # For daily, we often use the tick_type suffix for clarity
-    zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
-    csv_filename = f"{formatted_symbol}.csv"
+            zip_path = os.path.join(symbol_dir, f"{date_str}_{tick_type}.zip")
+            zf_name = f"{date_str}_{tick_type}.csv"
+            csv_content = lean_df.to_csv(index=False, header=False)
 
-    lean_df = get_lean_df(df, asset_class, tick_type, "formatted_time")
-    csv_content = lean_df.to_csv(index=False, header=False)
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(csv_filename, csv_content)
-    logger.debug(f"Saved {zip_path}")
-
-
-def save_hour_data(symbol, ohlcv_data, asset_class="cryptofuture", tick_type="trade"):
-    if not ohlcv_data:
-        return
-    df = pd.DataFrame(
-        ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"]
-    )
-    df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
-    df["dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df["formatted_time"] = df["dt"].dt.strftime("%Y%m%d %H:%M")
-
-    formatted_symbol = format_symbol(symbol)
-    base_dir = os.path.join(DATA_LOCATION, asset_class, "binance", "hour")
-    os.makedirs(base_dir, exist_ok=True)
-
-    # For hour, primary tick type usually has no suffix
-    primary_tick = "quote" if asset_class in ["forex", "cfd"] else "trade"
-    suffix = f"_{tick_type}" if tick_type != primary_tick else ""
-    zip_path = os.path.join(base_dir, f"{formatted_symbol}{suffix}.zip")
-    csv_filename = f"{formatted_symbol}.csv"
-
-    lean_df = get_lean_df(df, asset_class, tick_type, "formatted_time")
-    csv_content = lean_df.to_csv(index=False, header=False)
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(csv_filename, csv_content)
-    logger.debug(f"Saved {zip_path}")
-
-
-def save_minute_data(symbol, ohlcv_data, asset_class="cryptofuture", tick_type="trade"):
-    if not ohlcv_data:
-        return
-    df = pd.DataFrame(
-        ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"]
-    )
-    df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
-    df["dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df["date_str"] = df["dt"].dt.strftime("%Y%m%d")
-
-    formatted_symbol = format_symbol(symbol)
-    symbol_dir = os.path.join(
-        DATA_LOCATION, asset_class, "binance", "minute", formatted_symbol
-    )
-    os.makedirs(symbol_dir, exist_ok=True)
-
-    for date_str, group in df.groupby("date_str"):
-        day_start = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=timezone.utc)
-        day_end = day_start + timedelta(days=1)
-        mask = (group["dt"] >= day_start) & (group["dt"] < day_end)
-        day_group = group.loc[mask].copy()
-        if day_group.empty:
-            continue
-
-        day_group["ms_midnight"] = day_group["dt"].apply(get_ms_from_midnight)
-        lean_df = get_lean_df(day_group, asset_class, tick_type, "ms_midnight")
-
-        # Filename: YYYYMMDD_trade.zip
-        zip_path = os.path.join(symbol_dir, f"{date_str}_{tick_type}.zip")
-        zf_name = f"{date_str}_{tick_type}.csv"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(zf_name, csv_content)
+    else:
+        # Consolidated files for Hour and Daily
+        os.makedirs(base_dir, exist_ok=True)
+        
+        if resolution == "daily":
+            df["time_val"] = df["dt"].dt.strftime("%Y%m%d 00:00")
+            zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
+        else: # hour
+            df["time_val"] = df["dt"].dt.strftime("%Y%m%d %H:%M")
+            primary_tick = "quote" if asset_class in ["forex", "cfd"] else "trade"
+            suffix = f"_{tick_type}" if tick_type != primary_tick else ""
+            zip_path = os.path.join(base_dir, f"{formatted_symbol}{suffix}.zip")
+            
+        csv_filename = f"{formatted_symbol}.csv"
+        lean_df = get_lean_df(df, asset_class, tick_type, "time_val")
         csv_content = lean_df.to_csv(index=False, header=False)
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(zf_name, csv_content)
+            zf.writestr(csv_filename, csv_content)
+    
+    logger.debug(f"Saved {resolution} data for {symbol}")
+
 
 
 def save_margin_interest(symbol, rates_data):
