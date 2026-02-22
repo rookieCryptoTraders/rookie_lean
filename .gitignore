@@ -31,3 +31,4 @@ cli_commands
 backtests/
 **/lean.json
 backtest
+preprocessors
