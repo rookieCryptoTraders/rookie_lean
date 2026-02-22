@@ -5,13 +5,17 @@ Central configuration for the data fetching package.
 """
 
 import os
+# load .env variables from a .env file if present
+from dotenv import load_dotenv
+load_dotenv()
 
 # ============================================================================
 # PATH CONFIGURATION
 # ============================================================================
 
 # Root directory for all data storage
-DATA_ROOT = "/Users/chenzhao/Documents/lean_workspace/data"
+DATA_LOCATION = os.path.join("../",os.getenv("DATA_RELATIVE_LOCATION", "data"))
+BASE_DATA_PATH = DATA_LOCATION
 
 # Asset class subdirectory
 ASSET_CLASS = "cryptofuture"
@@ -19,15 +23,12 @@ ASSET_CLASS = "cryptofuture"
 # Exchange
 EXCHANGE = "binance"
 
-# Full base path
-BASE_DATA_PATH = os.path.join(DATA_ROOT, ASSET_CLASS, EXCHANGE)
-
 # ============================================================================
 # DATE RANGE
 # ============================================================================
 
-START_DATE = "2025-01-01"
-END_DATE = "2026-01-31"
+START_DATE = "2026-01-01"
+END_DATE = "2026-02-12"
 
 # ============================================================================
 # NETWORK
@@ -85,6 +86,7 @@ DEFAULT_TICKERS = [
     "MKRUSDT",
     "LDOUSDT",
 ]
+TOP_N_SYMBOL=2
 
 # Ticker name mapping (for rebranded assets)
 TICKER_ALIASES = {

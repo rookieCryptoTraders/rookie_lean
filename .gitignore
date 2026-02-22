@@ -8,6 +8,7 @@ __pycache__/
 # Data
 data/**/*.zip
 data/**/*.csv
+data
 # But keep the directories
 !data/**/.gitkeep
 
@@ -26,3 +27,7 @@ lean.json
 *.log
 launcher.log
 backtests/
+cli_commands
+backtests/
+**/lean.json
+backtest
