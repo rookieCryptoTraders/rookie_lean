@@ -128,11 +128,11 @@ def test_load_depth_data():
     date_str = "20260101"
 
     # Load with align_ms=60000, pivot=True, ffill=True
-    # loaded_df = load_depth_data(symbol,date_str,align_ms=None,pivot=False,ffill=False,fill_first=False)
-    # loaded_df = load_depth_data(symbol,date_str,align_ms=None,pivot=False,ffill=True,fill_first=False)
-    # loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=False,ffill=False,fill_first=True)
-    # loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=False,ffill=True,fill_first=False)
-    # loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=False,ffill=True,fill_first=True)
+    loaded_df = load_depth_data(symbol,date_str,align_ms=None,pivot=False,ffill=False,fill_first=False)
+    loaded_df = load_depth_data(symbol,date_str,align_ms=None,pivot=False,ffill=True,fill_first=False)
+    loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=False,ffill=False,fill_first=True)
+    loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=False,ffill=True,fill_first=False)
+    loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=False,ffill=True,fill_first=True)
     loaded_df = load_depth_data(symbol,date_str,align_ms=60*1000,pivot=True,ffill=True,fill_first=True)
     print(loaded_df)
 
