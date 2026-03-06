@@ -1,377 +1,230 @@
-# region imports
 from AlgorithmImports import *
-from sklearn.linear_model import HuberRegressor
-import numpy as np
-import pandas as pd
-from datetime import timedelta,datetime
-# endregion
+from datetime import timedelta, datetime
 
-# Top 30 Binance Futures by volume/liquidity
-TICKERS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    # "BNBUSDT",
-    # "SOLUSDT",
-    # "XRPUSDT",
-    # "DOGEUSDT",
-    # "ADAUSDT",
-    # "AVAXUSDT",
-    # "DOTUSDT",
-    # "LINKUSDT",
-    # "MATICUSDT",
-    # "LTCUSDT",
-    # "UNIUSDT",
-    # "ATOMUSDT",
-    # "ETCUSDT",
-    # "FILUSDT",
-    # "APTUSDT",
-    # "NEARUSDT",
-    # "ARBUSDT",
-    # "OPUSDT",
-    # "INJUSDT",
-    # "SUIUSDT",
-    # "TIAUSDT",
-    # "SEIUSDT",
-    # "STXUSDT",
-    # "IMXUSDT",
-    # "RUNEUSDT",
-    # "AAVEUSDT",
-    # "MKRUSDT",
-    # "LDOUSDT",
-]
-
-class SymbolData:
-    def __init__(self, algo:QCAlgorithm, symbol):
-        self.algo = algo
-        self.symbol = symbol
-        
-        # --- 初始化指标 ---
-        # 1. 布林带 (Close)
-        self.bb = algo.bb(symbol, 20, 2, MovingAverageType.SIMPLE, Resolution.MINUTE)
-        
-        # 2. Close SMA
-        self.sma_close = algo.sma(symbol, 20, Resolution.MINUTE)
-        
-        # 3. High SMA (手动注册)
-        self.sma_high = SimpleMovingAverage(20)
-        algo.register_indicator(symbol, self.sma_high, Resolution.MINUTE, Field.HIGH)
-        
-        # 4. Volume SMA (手动注册)
-        self.sma_vol = SimpleMovingAverage(20)
-        algo.register_indicator(symbol, self.sma_vol, Resolution.MINUTE, Field.VOLUME)
-        
-        # --- 初始化滚动窗口 (RollingWindow) ---
-        # 记录 SMA High 的历史数据
-        self.sma_high_window = RollingWindow[IndicatorDataPoint](5)
-        self.sma_high.updated += lambda sender, updated: self.sma_high_window.add(updated)
-        
-        # # 3. 手动触发热身（解决 Forward Only 报错的最有效方法）
-        # # 这会立即抓取历史数据填充指标，而不会等待回测数据流
-        # res=Resolution.MINUTE
-        # algo.warm_up_indicator(symbol, self.bb, res)
-        # algo.warm_up_indicator(symbol, self.sma_close, res)
-        # algo.warm_up_indicator(symbol, self.sma_high, res)
-        # algo.warm_up_indicator(symbol, self.sma_vol, res)
-
-    @property
-    def is_ready(self):
-        # 必须所有指标和窗口都填满数据
-        return (self.bb.is_ready and 
-                self.sma_close.is_ready and 
-                self.sma_high.is_ready and 
-                self.sma_vol.is_ready and 
-                self.sma_high_window.is_ready)
-
-class Aswinningrate(QCAlgorithm):
-
-    def initialize(self):
-        # self._can_trade = False
-        self.settings.automatic_indicator_warm_up = False
+from utils import CryptoFutureDepthData
+from alpha import AltcoinShortAlphaModel
 
 
+class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
+    """
+    Altcoin Short Strategy Winning Rate - on_data 驱动实现（不使用 Algorithm Framework）
+
+    思路（参考备份版本与官方 BasicTemplateCryptoAlgorithm 模式）：
+    - initialize 中完成合约订阅与指标初始化
+    - on_data 中基于简单趋势信号（EMA 快慢线）做空 Altcoin
+    - 不加载深度数据，仅使用行情 K 线（分钟）
+    """
+
+    def initialize(self) -> None:
+        self.counter = 0
         self.set_time_zone("UTC")
-        self.set_start_date(datetime(year=2026,month=2,day=4,hour=12))
-        self.set_end_date(datetime(year=2026,month=2,day=7,hour=0))
-        
-        self.set_cash("USDT", 100000)
+        self.set_start_date(2026, 2, 3)
+        self.set_end_date(2026, 2, 6)
+        self.set_account_currency("USDT")
+        self.set_cash(100000)  # 100k USDT
+
+        # Binance 永续合约
         self.set_brokerage_model(BrokerageName.BINANCE_FUTURES, AccountType.MARGIN)
-        
-        # Create some indicators to detect trading opportunities.
-        # self._macd=self.macd
 
-            
-        # Add all symbols
-        self.symbols = []
-        self.targets : dict[str,SymbolData]= {}
-        self.consolidators_trade = dict()
-        self.consolidators_quote = dict()
-        for ticker in TICKERS:
+        # 基准：BTCUSDT 永续
+        btc_benchmark = Symbol.create("BTCUSDT", SecurityType.CRYPTO_FUTURE, Market.BINANCE)
+        self.set_benchmark(btc_benchmark)
+
+        # 策略参数（支持 config.json 中通过 get_parameter 调参）
+        max_positions = int(self.get_parameter("max-positions", 5))
+        leverage = int(self.get_parameter("leverage", 2))
+        cooldown_minutes = float(self.get_parameter("cooldown-minutes", 60.0))
+
+        self._max_positions = max_positions
+        self._position_size = 1.0 / max_positions
+        self._cooldown_minutes = cooldown_minutes
+
+        # 订阅合约并为每个交易标的创建简单指标容器
+        self.symbols: list[Symbol] = []
+        self.depth_symbols: dict[Symbol, Symbol] = {}
+
+        # Alpha model: all feature engineering lives inside AltcoinShortAlphaModel
+        self.alpha_model = AltcoinShortAlphaModel(
+            max_positions=max_positions,
+        )
+        # Register AlphaModel with the Algorithm Framework so LEAN
+        # drives its update() calls and manages Insight lifecycle.
+        self.add_alpha(self.alpha_model)
+
+        # Altcoin 列表（BTC 仅作为基准，不参与交易）
+        tickers = [
+            "BTCUSDT",  # benchmark only
+            "ETHUSDT",
+            "BNBUSDT",
+            "SOLUSDT",
+        ]
+
+        added_count = 0
+        for ticker in tickers:
             try:
-                crypto_future = self.add_crypto_future(ticker, Resolution.MINUTE, Market.BINANCE)
-                self.debug(f"added {crypto_future.symbol}")
-                # crypto_future.sma_fast = self.sma(crypto_future.symbol, 5, Resolution.Minute)  # default close
-                # crypto_future.sma_slow = self.sma(crypto_future.symbol, 30, Resolution.Minute)  # default close
-                # crypto_future.close_window = RollingWindow[float](window_size)
-                # crypto_future.high_window = RollingWindow[float](window_size)
-                # crypto_future.low_window = RollingWindow[float](window_size)
-                # crypto_future.volume_window = RollingWindow[float](window_size)
-                # crypto_future.sma_fast.updated += lambda sender, updated: crypto_future.close_window.add(updated)
-                # crypto_future.sma_slow.Updated += lambda sender, updated: crypto_future.high_window.add(updated)
-                self.symbols.append(crypto_future.symbol)
-                self.targets[crypto_future.symbol] = SymbolData(self, crypto_future.symbol)   
-            except:
-                self.debug(f"Failed to add {ticker}")
-                
-        # for symbol in self.symbols:
-        #     try:
-        #         # # Consolidate data into 60-minute bars.
-        #         # consolidator = self.consolidate(symbol, timedelta(minutes=60), self._consolidation_handler) 
-        #         # self.consolidators_trade[symbol] = consolidator               
-        #         # Hook up the indicators to be updated with the 60-min bars.
-        #         for indicator in [self._close_windows ,self._volume_windows ,self._high_windows ]:
-        #             # self.register_indicator(symbol, indicator, consolidator)
-        #             self.register_indicator(symbol, indicator)
-        #     except:
-        #         self.debug(f"Failed to create consolidator for {symbol}")
-            
+                crypto_future = self.add_crypto_future(
+                    ticker,
+                    resolution=Resolution.MINUTE,
+                    market=Market.BINANCE,
+                    fill_forward=True,
+                    leverage=leverage,
+                )
+                symbol = crypto_future.symbol
+                self.symbols.append(symbol)
+
+                # 将合约注册到 AlphaModel，由 AlphaModel 维护因子与特征
+                self.alpha_model.register_symbol(self, symbol)
+
+                # 订阅深度数据（自定义 Depth PythonData）
+                # Use fill_forward=True to ensure every minute has a snapshot (pump logic)
+                depth_custom = self.add_data(
+                    CryptoFutureDepthData,
+                    ticker,
+                    Resolution.MINUTE,
+                    fill_forward=True,
+                )
+                self.debug(f"[main] register depth for {ticker} with symbol {depth_custom.symbol}")
+                self.depth_symbols[symbol] = depth_custom.symbol
+                self.alpha_model.register_depth_symbol(symbol, depth_custom.symbol)
+
+                added_count += 1
+                self.debug(f"[Init] Added CryptoFuture: {ticker}. symbol: {symbol}")
+            except Exception as e:
+                self.debug(f"[Init] Failed to add {ticker}: {e}")
+
+        self.debug(f"[Init] Total CryptoFutures added: {added_count}/{len(tickers)}")
+
+        # 简单 warm-up，确保 EMA 等指标准备就绪
+        self.set_warm_up(timedelta(days=2))
+        self._last_trade_time: dict[Symbol, datetime] = {}
+
+        # 定时状态日志（每小时一次）
+        self.schedule.on(
+            self.date_rules.every_day(),
+            self.time_rules.every(timedelta(hours=1)),
+            self._log_status,
+        )
+
+        self.debug("=" * 60)
+        self.debug(
+            f"Altcoin Short (AlphaModel + on_data execute) Initialized | "
+            f"Positions: {max_positions} | Leverage: {leverage}x"
+        )
+        self.debug("=" * 60)
+
+    def _log_status(self) -> None:
+        """定时状态日志"""
+        holdings = [h for h in self.portfolio.values() if h.invested]
+
+        total_pnl = sum(h.unrealized_profit for h in holdings)
+        margin_used = sum(abs(h.holdings_value) for h in holdings)
 
 
-        self.debug(f"Added {len(self.symbols)} symbols")
+        self.debug(
+            f"[Status] Positions: {len(holdings)}/{self._max_positions} | "
+            f"PnL: ${total_pnl:.2f} | "
+            f"Margin: ${margin_used:.2f} | "
+            f"Equity: ${self.portfolio.total_portfolio_value:.2f}"
+        )
 
-        # warmup
-        self.warm_up_period = timedelta(days=1)
-        self.set_warm_up(self.warm_up_period)
-
-        # # Schedule
-        # self.train(self.train_model)
-        # self.schedule.on(
-        #     self.date_rules.every(DayOfWeek.Sunday),
-        #     self.time_rules.at(0, 0),
-        #     self.train_model,
-        # )
-        # self.schedule.on(
-        #     self.date_rules.every_day(),
-        #     self.time_rules.every(timedelta(hours=1)),
-        #     self.run_prediction,
-        # )
-        # self.schedule.on(
-        #     self.date_rules.every_day(),
-        #     self.time_rules.every(interval=timedelta(hours=1)),
-            
-        # )
-
-        # self.set_warm_up(timedelta(days=7))
-        self.debug("Initialized")
-
-    # def train_model(self):
-    #     """Train on pooled data from ALL symbols."""
-    #     all_features = []
-    #     all_labels = []
-
-    #     for sym in self.symbols:
-    #         history = self.history(
-    #             sym, timedelta(days=self.lookback_days), Resolution.Minute
-    #         )
-    #         if history.empty:
-    #             continue
-
-    #         try:
-    #             df = history.loc[sym]
-    #         except:
-    #             continue
-
-    #         hourly = df.resample("1H").last().dropna()
-    #         df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
-
-    #         for ts in hourly.index:
-    #             try:
-    #                 w12h = df.loc[ts - timedelta(hours=12) : ts]
-    #                 w1h = df.loc[ts - timedelta(hours=1) : ts]
-    #                 w24h = df.loc[ts - timedelta(hours=24) : ts]
-
-    #                 if len(w1h) < 30:
-    #                     continue
-
-    #                 price = w1h.iloc[-1]["close"]
-    #                 sigma_1h = w1h["log_ret"].std()
-    #                 if sigma_1h == 0:
-    #                     continue
-
-    #                 high_24h = w24h["high"].max()
-    #                 feat_short_dist = (high_24h - price) / (price * sigma_1h)
-    #                 feat_skew = w1h["log_ret"].skew()
-
-    #                 rets = w12h["log_ret"]
-    #                 s_down = rets[rets < 0].std()
-    #                 s_up = rets[rets > 0].std()
-    #                 s_down = 0 if pd.isna(s_down) else s_down
-    #                 s_up = 0 if pd.isna(s_up) else s_up
-    #                 feat_vol_ratio = s_down / (s_up + 1e-6)
-
-    #                 vwap = (w12h["close"] * w12h["volume"]).sum() / (
-    #                     w12h["volume"].sum() + 1e-6
-    #                 )
-    #                 feat_vwap = (price - vwap) / vwap
-
-    #                 # Label
-    #                 future_start = ts + timedelta(minutes=1)
-    #                 future_end = ts + timedelta(hours=24)
-    #                 if future_end > df.index[-1]:
-    #                     continue
-    #                 future = df.loc[future_start:future_end]
-    #                 if future.empty:
-    #                     continue
-
-    #                 max_down = max(price - future["low"].min(), price * 0.001)
-    #                 max_up = max(future["high"].max() - price, price * 0.001)
-    #                 y = np.log(max_down / max_up)
-
-    #                 row = np.nan_to_num(
-    #                     [feat_short_dist, feat_skew, feat_vol_ratio, feat_vwap]
-    #                 )
-    #                 all_features.append(row)
-    #                 all_labels.append(y)
-    #             except:
-    #                 continue
-
-    #     if len(all_features) > 100:
-    #         self.model.fit(all_features, all_labels)
-    #         self.model_ready = True
-    #         self.debug(
-    #             f"Model Trained on {len(all_features)} samples. Coefs: {self.model.coef_}"
-    #         )
-    #     else:
-    #         self.debug(f"Not enough samples: {len(all_features)}")
-
-    def on_data(self, data: Slice):
+    def on_data(self, data: Slice) -> None:
+        """
+        主交易逻辑：
+        - 将行情切片传递给 AlphaModel 生成 Insights
+        - on_data 只负责根据 Insights 执行持仓调整，不再做复杂特征计算
+        """
         if self.is_warming_up:
             return
 
-        # single symbol strategy
-        for sym in self.symbols:
-            if sym in self.targets and self.targets[sym].is_ready:
-                if sym in data.bars:
-                    # self.debug(f"on_data for {data.bars[sym]}")
-                    # Scan for long trades.
-                    open_price = data.bars[sym].open
-                    close_price = data.bars[sym].close
-                    high_price = data.bars[sym].high
-                    low_price = data.bars[sym].low
-                    volume = data.bars[sym].volume
-                    
-                    sma_close = self.targets[sym].sma_close.current.value
-                    sma_high = self.targets[sym].sma_high.current.value
-                    sma_vol = self.targets[sym].sma_vol.current.value
-                    sma_high_window = self.targets[sym].sma_high_window[0].value
-                    # self.debug(f" sma_close {sma_close } sma_high {sma_high } sma_vol {sma_vol } sma_high_window {sma_high_window }")
-                    self.log(f" open_price {open_price } high_price {high_price } low_price {low_price } close_price {close_price } volume {volume }  sma_close {sma_close } sma_high {sma_high } sma_vol {sma_vol } sma_high_window {sma_high_window }")
+        self.counter += 1
+        if self.counter % 1000 == 0:
+            self.debug(f"[OnData] Heartbeat at {self.time}")
 
-                    # Example logic: if close SMA < high SMA and volume SMA increasing, go short
-                    if sma_close < sma_high:
-                        # self.set_holdings(sym, -0.05)  # Short 5% of portfolio
-                        self.market_order(sym, -0.1)
-                        self.log(f"Shorting {sym}")
-                        
-                        self.log(f"Portfolio {self.portfolio.positions.to_string()} Value: {self.portfolio.total_portfolio_value}, Cash: {self.portfolio.cash}")
-                    # elif sma_close > sma_high and sma_vol > 0 and sma_high > sma_high_window:
-                    #     self.set_holdings(sym, 0.05)  # Long 5% of portfolio
-                    #     self.debug(f"Longing {sym}")
-                    # else:
-                    #     self.set_holdings(sym, 0)  # Exit position
-                    #     self.debug(f"Exiting position for {sym}")
-                else:
-                    self.error(f"no bar data {sym}")
-            else:
-                self.error(f"data not ready {sym}")
-                                    
+        now = self.time.replace(second=0, microsecond=0)
 
-    # def run_prediction(self):
-    #     if not self.model_ready or self.is_warming_up:
-    #         return
+        # 由 AlphaModel 生成做空信号（InsightDirection.Down），
+        # AlphaModel 由框架通过 add_alpha 自动调用 update()，
+        # 这里只读取最新的 insights，不再手动触发 update。
+        insights = list(self.alpha_model.latest_insights)
+        if not insights:
+            # Brief heartbeat to show we are reading alpha output
+            if self.counter % 60 == 0:
+                self.debug(
+                    f"[OnData] no insights | time={self.time} | "
+                    f"alpha_pool={len(self.alpha_model.coin_data)}"
+                )
+            return
 
-    #     predictions = {}
+        # 只保留做空类 insight，按权重排序，限制最大标的数量
+        short_insights = [
+            i for i in insights if i.direction == InsightDirection.DOWN
+        ]
+        # if not short_insights:
+        #     return
 
-    #     for sym in self.symbols:
-    #         if not self.close_windows[sym].is_ready:
-    #             continue
+        short_insights.sort(key=lambda x: abs(x.weight or 0.0), reverse=True)
+        desired_symbols = {i.symbol for i in short_insights[: self._max_positions]}
 
-    #         closes = np.array([x for x in self.close_windows[sym]])[::-1]
-    #         volumes = np.array([x for x in self.volume_windows[sym]])[::-1]
-    #         highs = np.array([x for x in self.high_windows[sym]])[::-1]
+        # DEBUG: Trace the execution flow and the depth signals in the active insights
+        for ins in short_insights[: self._max_positions]:
+             depth_info = [part for part in ins.Tag.split('|') if 'obi' in part or 'mp_div' in part]
+             self.log(f"[Main-Depth-Flow] Processing Insight for {ins.symbol.value} | Weight: {ins.weight:.3f} | DepthSignals: {depth_info}")
 
-    #         if len(closes) < 720:
-    #             continue
+        self.debug(
+            f"[OnData] insights={len(insights)} short_insights={len(short_insights)} "
+            f"desired={len(desired_symbols)} | "
+            f"symbols={[s.value for s in list(desired_symbols)[:5]]}"
+        )
 
-    #         w1h = closes[-60:]
-    #         w12h = closes[-720:]
-    #         w12h_vol = volumes[-720:]
+        # 当前已持有的空头（用于限制最大持仓数 & 管理平仓）
+        active_shorts = {
+            h.symbol
+            for h in self.portfolio.values()
+            if h.invested and h.quantity < 0
+        }
 
-    #         ret_1h = np.diff(np.log(w1h))
-    #         ret_12h = np.diff(np.log(w12h))
+        # 平掉不再在候选集合中的空头
+        for symbol in list(active_shorts):
+            if symbol not in desired_symbols:
+                last = self._last_trade_time.get(symbol)
+                if last is not None and (now - last).total_seconds() < self._cooldown_minutes * 60:
+                    continue
 
-    #         price = closes[-1]
-    #         high_24h = np.max(highs)
-    #         sigma_1h = np.std(ret_1h)
-    #         if sigma_1h == 0:
-    #             continue
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
 
-    #         feat_short_dist = (high_24h - price) / (price * sigma_1h)
-    #         mean_ret = np.mean(ret_1h)
-    #         feat_skew = (
-    #             np.sum((ret_1h - mean_ret) ** 3) / (len(ret_1h) * sigma_1h**3)
-    #             if sigma_1h > 0
-    #             else 0
-    #         )
+        # 为候选集合中标的建立 / 维持均匀仓位空头
+        for symbol in desired_symbols:
+            last = self._last_trade_time.get(symbol)
+            if last is not None and (now - last).total_seconds() < self._cooldown_minutes * 60:
+                continue
 
-    #         down_rets = ret_12h[ret_12h < 0]
-    #         up_rets = ret_12h[ret_12h > 0]
-    #         s_down = np.std(down_rets) if len(down_rets) > 0 else 0
-    #         s_up = np.std(up_rets) if len(up_rets) > 0 else 0
-    #         feat_vol_ratio = s_down / (s_up + 1e-6)
+            target_weight = -self._position_size
+            current_weight = 0.0
+            total_value = self.portfolio.total_portfolio_value
+            if total_value > 0:
+                current_weight = self.portfolio[symbol].holdings_value / total_value
 
-    #         vwap = np.sum(w12h * w12h_vol) / (np.sum(w12h_vol) + 1e-6)
-    #         feat_vwap = (price - vwap) / vwap
+            if abs(target_weight - current_weight) < 0.01:
+                continue
 
-    #         row = np.nan_to_num([feat_short_dist, feat_skew, feat_vol_ratio, feat_vwap])
-    #         y_pred = self.model.predict([row])[0]
-    #         predictions[sym] = y_pred
+            self.set_holdings(symbol, target_weight)
+            self._last_trade_time[symbol] = now
 
-    #     if len(predictions) < 10:
-    #         return
-
-    #     # Rank and select
-    #     sorted_preds = sorted(predictions.items(), key=lambda x: x[1])
-    #     bottom_15 = [
-    #         s for s, _ in sorted_preds[: self.top_n]
-    #     ]  # Most negative = LONG (expect up)
-    #     top_15 = [
-    #         s for s, _ in sorted_preds[-self.top_n :]
-    #     ]  # Most positive = SHORT (expect down)
-
-    #     # Rebalance
-    #     for sym in self.symbols:
-    #         if sym in top_15:
-    #             target = -self.position_size_per_asset
-    #         elif sym in bottom_15:
-    #             target = self.position_size_per_asset
-    #         else:
-    #             target = 0
-
-    #         current = (
-    #             self.portfolio[sym].holdings_value / self.portfolio.total_portfolio_value
-    #             if self.portfolio.total_portfolio_value > 0
-    #             else 0
-    #         )
-
-    #         if abs(target - current) > 0.01:
-    #             self.set_holdings(sym, target)
-
-    #     self.debug(f"Rebalanced: Long {len(bottom_15)}, Short {len(top_15)}")
-
-    def on_order_event(self, order_event):
-        if order_event.status == OrderStatus.Filled:
+    def on_order_event(self, order_event: OrderEvent) -> None:
+        """订单事件回调"""
+        if order_event.status == OrderStatus.FILLED:
+            direction = "SHORT" if order_event.fill_quantity < 0 else "COVER"
             self.debug(
-                f"Filled: {order_event.symbol} @ {order_event.fill_price} x {order_event.fill_quantity}"
+                f"[Order] {direction} {order_event.symbol.value}: "
+                f"Qty={order_event.fill_quantity:.4f} @ ${order_event.fill_price:.4f}"
             )
-        elif order_event.status == OrderStatus.Invalid:
-            self.debug(f"Rejected: {order_event.message}")
+        elif order_event.status == OrderStatus.INVALID:
+            self.debug(f"[Order] Rejected: {order_event.message}")
+
+    def on_end_of_algorithm(self) -> None:
+        """策略结束回调"""
+        self.debug("=" * 60)
+        self.debug("Altcoin Short Strategy Completed")
+        self.debug(f"Final Portfolio Value: ${self.portfolio.total_portfolio_value:,.2f}")
+        self.debug("=" * 60)

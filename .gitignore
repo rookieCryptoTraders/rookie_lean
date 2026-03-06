@@ -32,3 +32,7 @@ backtests/
 **/lean.json
 backtest
 preprocessors
+.QuantConnect
+.pytest_cache
+.mypy_cache
+.cursor

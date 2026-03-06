@@ -29,7 +29,6 @@ try:
 except ImportError:
     # Standalone fallback
     PROXIES = {"http": "http://127.0.0.1:1082", "https": "http://127.0.0.1:1082"}
-    DATA_LOCATION = "/Users/chenzhao/Documents/lean_workspace/data"
     ASSET_CLASS = "cryptofuture"
 
 # Configuration

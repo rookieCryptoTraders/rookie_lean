@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccxt-data-fetch"
+version = "0.1.0"
+description = "Binance futures data downloader and Lean-compatible exporter built on ccxt."
+readme = "ccxt_data_fetch/README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "ccxt>=3.0.0",
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "requests>=2.31.0",
+  "python-dotenv>=1.0.0",
+  "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0.0",
+]
+
+[project.scripts]
+ccxt-data-fetch = "ccxt_data_fetch.cli:main"
+
+[tool.setuptools]
+packages = ["ccxt_data_fetch"]
+

@@ -104,7 +104,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         # =====================================================================
 
         # 1. Alpha Model - 生成做空信号
-        self.SetAlpha(
+        self.set_alpha(
             AltcoinShortAlphaModel(
                 max_positions=MAX_POSITIONS,
                 volatility_lookback_hours=volatility_lookback_hours,
@@ -118,7 +118,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         )
 
         # 2. Portfolio Construction Model - Enter-and-Hold
-        self.SetPortfolioConstruction(
+        self.set_portfolio_construction(
             EnterAndHoldPCM(
                 max_positions=MAX_POSITIONS,
                 leverage=LEVERAGE,
@@ -126,7 +126,7 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         )
 
         # 3. Risk Management Model - 动态出场风控
-        self.AddRiskManagement(
+        self.add_risk_management(
             DynamicExitRiskModel(
                 flash_tp_threshold=flash_tp_threshold,
                 flash_tp_hours=flash_tp_hours,
@@ -138,10 +138,10 @@ class AltcoinShortAlgorithm(QCAlgorithm):
         )
 
         # 全局熔断
-        self.AddRiskManagement(MaximumDrawdownPercentPortfolio(portfolio_max_dd))
+        self.add_risk_management(MaximumDrawdownPercentPortfolio(portfolio_max_dd))
 
         # 4. Execution Model - 智能价差执行
-        self.SetExecution(
+        self.set_execution(
             SmartSpreadExecutionModel(
                 max_spread_percent=max_spread_percent,
                 max_wait_hours=max_wait_hours,

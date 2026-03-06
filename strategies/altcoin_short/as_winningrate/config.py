@@ -14,9 +14,9 @@ load_dotenv()
 # ============================================================================
 
 # Root directory for all data storage
-_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))   # ccxt_data_fetch/
-_PROJECT_ROOT = os.path.dirname(_CONFIG_DIR)               # rookie_lean/
-DATA_LOCATION = os.path.join(_PROJECT_ROOT, os.getenv("DATA_RELATIVE_LOCATION", "data"))        # rookie_lean/data
+_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))   # strategies/altcoin_short/as_winningrate/
+_PROJECT_ROOT = os.path.join(os.path.dirname(_CONFIG_DIR),"../../")               # /
+DATA_LOCATION = os.path.join(_PROJECT_ROOT, os.getenv("DATA_RELATIVE_LOCATION", "data"))        # data
 BASE_DATA_PATH = DATA_LOCATION
 
 # Asset class subdirectory
@@ -29,8 +29,8 @@ EXCHANGE = "binance"
 # DATE RANGE
 # ============================================================================
 
-START_DATE = "2026-01-01"
-END_DATE = "2026-02-22"
+START_DATE = "2026-02-03"
+END_DATE = "2026-02-03"
 
 # ============================================================================
 # NETWORK
@@ -60,35 +60,35 @@ DEFAULT_TICKERS = [
     "BTCUSDT",
     "ETHUSDT",
     "BNBUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "DOGEUSDT",
-    "ADAUSDT",
-    "AVAXUSDT",
-    "DOTUSDT",
-    "LINKUSDT",
-    "POLUSDT",
-    "LTCUSDT",
-    "UNIUSDT",
-    "ATOMUSDT",
-    "ETCUSDT",
-    "FILUSDT",
-    "APTUSDT",
-    "NEARUSDT",
-    "ARBUSDT",
-    "OPUSDT",
-    "INJUSDT",
-    "SUIUSDT",
-    "TIAUSDT",
-    "SEIUSDT",
-    "STXUSDT",
-    "IMXUSDT",
-    "RUNEUSDT",
-    "AAVEUSDT",
-    "MKRUSDT",
-    "LDOUSDT",
+    # "SOLUSDT",
+    # "XRPUSDT",
+    # "DOGEUSDT",
+    # "ADAUSDT",
+    # "AVAXUSDT",
+    # "DOTUSDT",
+    # "LINKUSDT",
+    # "POLUSDT",
+    # "LTCUSDT",
+    # "UNIUSDT",
+    # "ATOMUSDT",
+    # "ETCUSDT",
+    # "FILUSDT",
+    # "APTUSDT",
+    # "NEARUSDT",
+    # "ARBUSDT",
+    # "OPUSDT",
+    # "INJUSDT",
+    # "SUIUSDT",
+    # "TIAUSDT",
+    # "SEIUSDT",
+    # "STXUSDT",
+    # "IMXUSDT",
+    # "RUNEUSDT",
+    # "AAVEUSDT",
+    # "MKRUSDT",
+    # "LDOUSDT",
 ]
-TOP_N_SYMBOL=2
+TOP_N_SYMBOL=3
 
 # Ticker name mapping (for rebranded assets)
 TICKER_ALIASES = {

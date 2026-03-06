@@ -1,0 +1,64 @@
+{
+    "target": "TotalPerformance.PortfolioStatistics.SharpeRatio",
+    "target-direction": "max",
+    "parameters": [
+        {
+            "name": "max-positions",
+            "min": 3,
+            "max": 8,
+            "step": 1
+        },
+        {
+            "name": "insight-duration-hours",
+            "min": 12,
+            "max": 72,
+            "step": 12
+        },
+        {
+            "name": "selection-weight-power",
+            "min": 1.0,
+            "max": 3.0,
+            "step": 0.5
+        },
+        {
+            "name": "max-adverse-vol-ratio",
+            "min": 2.0,
+            "max": 5.0,
+            "step": 1.0
+        },
+        {
+            "name": "co-lookback",
+            "min": 12,
+            "max": 48,
+            "step": 12
+        },
+        {
+            "name": "co-decay",
+            "min": 0.85,
+            "max": 0.99,
+            "step": 0.05
+        },
+        {
+            "name": "flash-tp-threshold",
+            "min": 0.04,
+            "max": 0.12,
+            "step": 0.02
+        },
+        {
+            "name": "trailing-default",
+            "min": 0.03,
+            "max": 0.08,
+            "step": 0.01
+        },
+        {
+            "name": "hard-stop",
+            "min": 0.06,
+            "max": 0.15,
+            "step": 0.03
+        }
+    ],
+    "constraints": [
+        "TotalPerformance.PortfolioStatistics.Drawdown < 0.25",
+        "TotalPerformance.TradeStatistics.TotalNumberOfTrades > 50"
+    ]
+}

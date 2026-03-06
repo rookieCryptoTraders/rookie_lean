@@ -1,7 +1,7 @@
 import logging
 import requests
 import ccxt
-from config import PROXIES
+from ccxt_data_fetch.config import PROXIES
 
 logger = logging.getLogger(__name__)
 
