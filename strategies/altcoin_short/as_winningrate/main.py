@@ -9,21 +9,25 @@ import os
 
 from config import ASSET_CLASS, BASE_DATA_PATH, EXCHANGE
 from config import DATA_LOCATION, PROXIES, _CONFIG_DIR, _PROJECT_ROOT
+
 # datetime set time zone to UTC
-os.environ['TZ'] = 'UTC'
+os.environ["TZ"] = "UTC"
 ttime.tzset()
+
 
 class MyMarginInterestRateModel:
     def __init__(self, algorithm: QCAlgorithm, symbol: Symbol):
         self.algorithm = algorithm
         self.symbol = symbol
 
-
-    def apply_margin_interest_rate(self, margin_interest_rate_parameters: MarginInterestRateParameters) -> None:
+    def apply_margin_interest_rate(
+        self, margin_interest_rate_parameters: MarginInterestRateParameters
+    ) -> None:
         holdings = margin_interest_rate_parameters.security.holdings
         position_value = holdings.get_quantity_value(holdings.quantity)
         position_value.cash.add_amount(-1)
-        
+
+
 class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
     """
     Altcoin Short Strategy Winning Rate - on_data 驱动实现（不使用 Algorithm Framework）
@@ -36,7 +40,9 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
     def initialize(self) -> None:
         # Trace/verbose: log all details (DEBUG from utils/alpha + LEAN self.debug)
-        log_level = (self.get_parameter("log-level", "debug") or "debug").strip().upper()
+        log_level = (
+            (self.get_parameter("log-level", "debug") or "debug").strip().upper()
+        )
         if log_level in ("DEBUG", "TRACE", "VERBOSE", "1", "0"):
             logging.getLogger().setLevel(logging.DEBUG)
             for name in ("__main__", "utils", "alpha"):
@@ -45,17 +51,20 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         self.counter = 0
         self.set_time_zone("UTC")
-        self.set_start_date(2026, 2, 3)
-        self.set_end_date(2026, 2, 3)
+        self.set_start_date(2026, 1, 15)
+        self.set_end_date(2026, 1, 15)
         self.set_account_currency("USDT")
         self.set_cash(100000)  # 100k USDT
 
+        # Configuration
+        self.symbols = []
+        self.depth_symbols = {}
+        self.quote_symbols = {}
+        self.regime_model = None  # Placeholder if you add regime detection later
+        self.alpha_model = None
+
         # Binance 永续合约
         self.set_brokerage_model(BrokerageName.BINANCE_FUTURES, AccountType.MARGIN)
-
-        # 基准：BTCUSDT 永续
-        btc_benchmark = Symbol.create("BTCUSDT", SecurityType.CRYPTO_FUTURE, Market.BINANCE)
-        self.set_benchmark(btc_benchmark)
 
         # 策略参数（支持 config.json 中通过 get_parameter 调参）
         max_positions = int(self.get_parameter("max-positions", 5))
@@ -69,7 +78,9 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         # 订阅合约并为每个交易标的创建简单指标容器
         self.symbols: list[Symbol] = []
         self.depth_symbols: dict[Symbol, Symbol] = {}
-        self.quote_symbols: dict[Symbol, Symbol] = {}  # L1 quote (top-of-book) for backtest/execution
+        self.quote_symbols: dict[
+            Symbol, Symbol
+        ] = {}  # L1 quote (top-of-book) for backtest/execution
 
         # Alpha model: all feature engineering lives inside AltcoinShortAlphaModel
         self.alpha_model = AltcoinShortAlphaModel(
@@ -81,17 +92,18 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         # Altcoin 列表（BTC 仅作为基准，不参与交易）
         tickers = [
-            "BTCUSDT",  # benchmark only
-            "ETHUSDT",
-            # "BNBUSDT",
-            "SOLUSDT",
+            "BTCUSDT",  # debug: only BTCUSDT to validate depth custom data
         ]
         # Depth data path is resolved in utils.CryptoFutureDepthData.get_source using LEAN's data folder
-        self.debug(f"[Init] Config: _CONFIG_DIR={_CONFIG_DIR}, _PROJECT_ROOT={_PROJECT_ROOT}, BASE_DATA_PATH={BASE_DATA_PATH}")
+        self.debug(
+            f"[Init] Config: _CONFIG_DIR={_CONFIG_DIR}, _PROJECT_ROOT={_PROJECT_ROOT}, BASE_DATA_PATH={BASE_DATA_PATH}"
+        )
 
         added_count = 0
+        alpha_symbols_to_register = []  # List to hold all symbols (base, depth, quote) for alpha model
         for ticker in tickers:
             try:
+                # 1. Base Security (CryptoFuture)
                 crypto_future = self.add_crypto_future(
                     ticker,
                     resolution=Resolution.MINUTE,
@@ -101,32 +113,27 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
                 )
                 # 设置一个固定的年化利率模型
                 symbol = crypto_future.symbol
-                crypto_future.set_margin_interest_rate_model(MyMarginInterestRateModel(self, symbol))
+                crypto_future.set_margin_interest_rate_model(
+                    MyMarginInterestRateModel(self, symbol)
+                )
                 self.symbols.append(symbol)
+                alpha_symbols_to_register.append(symbol)
 
-                # 将合约注册到 AlphaModel，由 AlphaModel 维护因子与特征
-                self.alpha_model.register_symbol(self, symbol)
-
-                # 订阅深度数据（自定义 Depth PythonData）
-                # Use fill_forward=True to ensure every minute has a snapshot (pump logic)
-                depth_custom = self.add_data(
-                    CryptoFutureDepthData,
-                    ticker,
-                    Resolution.MINUTE,
-                    fill_forward=True,
+                # 2. Custom Depth Data (Ticker suffix prevents Symbol collision)
+                depth_ticker_str = f"{ticker}.DEPTH"
+                depth_security = self.add_data(
+                    CryptoFutureDepthData, depth_ticker_str, Resolution.MINUTE
                 )
-                self.debug(f"[main] register depth for {ticker} with symbol {depth_custom.symbol}")
-                self.depth_symbols[symbol] = depth_custom.symbol
-                self.alpha_model.register_depth_symbol(symbol, depth_custom.symbol)
+                self.depth_symbols[symbol] = depth_security.symbol
+                alpha_symbols_to_register.append(depth_security.symbol)
 
-                # L1 quote (top-of-book bid/ask); live uses Security.BidPrice/AskPrice from broker
-                quote_custom = self.add_data(
-                    CryptoFutureQuoteData,
-                    ticker,
-                    Resolution.MINUTE,
-                    fill_forward=True,
+                # 3. Custom Quote Data (Optional, but let's keep it for completeness)
+                quote_ticker_str = f"{ticker}.QUOTE"
+                quote_security = self.add_data(
+                    CryptoFutureQuoteData, quote_ticker_str, Resolution.MINUTE
                 )
-                self.quote_symbols[symbol] = quote_custom.symbol
+                self.quote_symbols[symbol] = quote_security.symbol
+                alpha_symbols_to_register.append(quote_security.symbol)
 
                 added_count += 1
                 self.debug(f"[Init] Added CryptoFuture: {ticker}. symbol: {symbol}")
@@ -135,8 +142,27 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         self.debug(f"[Init] Total CryptoFutures added: {added_count}/{len(tickers)}")
 
+        # Benchmark: use lambda over our subscribed BTCUSDT so series align with performance
+        # (avoids StatisticsBuilder "1 misaligned values" from separate Hour benchmark feed)
+        btc_sym = next(
+            (s for s in self.symbols if s.value and str(s.value).upper() == "BTCUSDT"),
+            self.symbols[0] if self.symbols else None,
+        )
+        if btc_sym is not None:
+
+            def _benchmark_value(dt: datetime) -> float:
+                if btc_sym in self.securities and self.securities[btc_sym].price:
+                    return float(self.securities[btc_sym].price)
+                return 1.0
+
+            self.set_benchmark(_benchmark_value)
+            self.debug("[Init] Benchmark set to BTCUSDT (lambda from subscribed security)")
+        else:
+            self.set_benchmark(lambda dt: 1.0)
+            self.debug("[Init] No symbol for benchmark; using constant 1.0")
+
         # 简单 warm-up，确保 EMA 等指标准备就绪
-        self.set_warm_up(timedelta(days=2))
+        self.set_warm_up(timedelta(days=1))
         self._last_trade_time: dict[Symbol, datetime] = {}
         # L1 quote cache (bid, ask) from CryptoFutureQuoteData for backtest when Security.BidPrice/AskPrice are 0
         self._last_quote: dict[Symbol, tuple[float, float]] = {}
@@ -161,7 +187,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         total_pnl = sum(h.unrealized_profit for h in holdings)
         margin_used = sum(abs(h.holdings_value) for h in holdings)
-
 
         self.debug(
             f"[Status] Positions: {len(holdings)}/{self._max_positions} | "
@@ -207,9 +232,7 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
             return
 
         # 只保留做空类 insight，按权重排序，限制最大标的数量
-        short_insights = [
-            i for i in insights if i.direction == InsightDirection.DOWN
-        ]
+        short_insights = [i for i in insights if i.direction == InsightDirection.DOWN]
         # if not short_insights:
         #     return
 
@@ -218,8 +241,10 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         # DEBUG: Trace the execution flow and the depth signals in the active insights
         for ins in short_insights[: self._max_positions]:
-             depth_info = [part for part in ins.Tag.split('|') if 'obi' in part or 'mp_div' in part]
-            #  self.log(f"[Main-Depth-Flow] Processing Insight for {ins.symbol.value} | Weight: {ins.weight:.3f} | DepthSignals: {depth_info}")
+            depth_info = [
+                part for part in ins.Tag.split("|") if "obi" in part or "mp_div" in part
+            ]
+        #  self.log(f"[Main-Depth-Flow] Processing Insight for {ins.symbol.value} | Weight: {ins.weight:.3f} | DepthSignals: {depth_info}")
 
         # self.debug(
         #     f"[OnData] insights={len(insights)} short_insights={len(short_insights)} "
@@ -229,16 +254,17 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         # 当前已持有的空头（用于限制最大持仓数 & 管理平仓）
         active_shorts = {
-            h.symbol
-            for h in self.portfolio.values()
-            if h.invested and h.quantity < 0
+            h.symbol for h in self.portfolio.values() if h.invested and h.quantity < 0
         }
 
         # 平掉不再在候选集合中的空头
         for symbol in list(active_shorts):
             if symbol not in desired_symbols:
                 last = self._last_trade_time.get(symbol)
-                if last is not None and (now - last).total_seconds() < self._cooldown_minutes * 60:
+                if (
+                    last is not None
+                    and (now - last).total_seconds() < self._cooldown_minutes * 60
+                ):
                     continue
 
                 self.set_holdings(symbol, 0.0)
@@ -247,7 +273,10 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         # 为候选集合中标的建立 / 维持均匀仓位空头
         for symbol in desired_symbols:
             last = self._last_trade_time.get(symbol)
-            if last is not None and (now - last).total_seconds() < self._cooldown_minutes * 60:
+            if (
+                last is not None
+                and (now - last).total_seconds() < self._cooldown_minutes * 60
+            ):
                 continue
 
             target_weight = -self._position_size
@@ -277,5 +306,7 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         """策略结束回调"""
         self.debug("=" * 60)
         self.debug("Altcoin Short Strategy Completed")
-        self.debug(f"Final Portfolio Value: ${self.portfolio.total_portfolio_value:,.2f}")
+        self.debug(
+            f"Final Portfolio Value: ${self.portfolio.total_portfolio_value:,.2f}"
+        )
         self.debug("=" * 60)

@@ -419,40 +419,97 @@ def save_ohlcv_data(symbol, ohlcv_data, resolution, asset_class="cryptofuture", 
 def save_margin_interest(symbol, rates_data):
     """
     Save funding rates as margin interest.
-    LEAN format for margin_rate: Time (YYYYMMDD HH:mm), Interest Rate
+    LEAN requests margin interest as a direct CSV (not inside a zip):
+    data/cryptofuture/binance/margin_interest/<symbol>.csv
+    Format: Time (yyyyMMdd HH:mm:ss per LEAN MarginInterestRate.Reader), Interest Rate (no header).
     """
     if not rates_data:
         return
-        
+
     # CCXT fetchFundingRateHistory structure:
     # {'timestamp': 1600000000000, 'fundingRate': 0.0001, ...}
-    
     data_list = []
     for r in rates_data:
-        data_list.append([r['timestamp'], r['fundingRate']])
-        
+        data_list.append([r["timestamp"], r["fundingRate"]])
+
     df = pd.DataFrame(data_list, columns=["timestamp", "rate"])
     df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
     df["dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    
-    # Format: YYYYMMDD HH:mm
-    df["formatted_time"] = df["dt"].dt.strftime("%Y%m%d %H:%M")
-    
+    # LEAN MarginInterestRate.Reader expects exact "yyyyMMdd HH:mm:ss" (with seconds)
+    df["formatted_time"] = df["dt"].dt.strftime("%Y%m%d %H:%M:%S").str.strip()
+
     formatted_symbol = format_symbol(symbol)
-    # Per instructions: data/cryptofuture/binance/margin_interest/
     base_dir = os.path.join(DATA_LOCATION, "cryptofuture", "binance", "margin_interest")
     os.makedirs(base_dir, exist_ok=True)
-    
-    zip_path = os.path.join(base_dir, f"{formatted_symbol}.zip")
-    csv_filename = f"{formatted_symbol}.csv"
-    
-    # LEAN Margin Rate file: Time, Interest Rate
-    lean_df = df[["formatted_time", "rate"]]
-    csv_content = lean_df.to_csv(index=False, header=False)
-    
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(csv_filename, csv_content)
-    logger.debug(f"Saved margin interest {zip_path}")
+
+    # LEAN expects a plain CSV at margin_interest/<symbol>.csv (not .zip)
+    csv_path = os.path.join(base_dir, f"{formatted_symbol}.csv")
+    # Write without headers; no trailing spaces so LEAN's Reader parses correctly
+    with open(csv_path, "w") as f:
+        for _, row in df.iterrows():
+            t = str(row["formatted_time"]).strip()
+            r = f"{row['rate']:.10g}".strip()
+            f.write(f"{t},{r}\n")
+    logger.debug("Saved margin interest %s", csv_path)
+
+
+def fix_margin_interest_format(base_dir: str | None = None, data_folder: str | None = None) -> int:
+    """
+    Normalize existing margin_interest CSV files so LEAN can read them.
+    LEAN's MarginInterestRate.Reader expects "yyyyMMdd HH:mm:ss". If a file
+    has "yyyyMMdd HH:mm" (no seconds), this appends ":00" and rewrites.
+    Returns the number of files fixed.
+
+    Args:
+        base_dir: Full path to margin_interest folder. If None, built from data_folder or DATA_LOCATION.
+        data_folder: Top-level data folder (e.g. project "data"); margin_interest path is
+                     data_folder/cryptofuture/binance/margin_interest. Ignored if base_dir is set.
+    """
+    import re
+    if base_dir is None:
+        root = data_folder if data_folder is not None else DATA_LOCATION
+        base_dir = os.path.join(root, "cryptofuture", "binance", "margin_interest")
+    if not os.path.isdir(base_dir):
+        return 0
+    # LEAN expects "yyyyMMdd HH:mm:ss". If file has "yyyyMMdd HH:mm", add ":00"
+    time_no_seconds_re = re.compile(r"^\d{8}\s+\d{1,2}:\d{2}$")
+    fixed = 0
+    for name in os.listdir(base_dir):
+        if not name.endswith(".csv"):
+            continue
+        path = os.path.join(base_dir, name)
+        try:
+            with open(path) as f:
+                lines = f.readlines()
+        except OSError as e:
+            logger.warning("Could not read %s: %s", path, e)
+            continue
+        new_lines = []
+        changed = False
+        for line in lines:
+            line = line.rstrip("\n\r")
+            if not line.strip():
+                new_lines.append(line)
+                continue
+            parts = line.split(",", 1)
+            if len(parts) != 2:
+                new_lines.append(line)
+                continue
+            time_part, rest = parts[0].strip(), parts[1].strip()
+            if time_no_seconds_re.match(time_part):
+                time_part = time_part + ":00"
+                changed = True
+            new_lines.append(f"{time_part},{rest}")
+        if changed:
+            try:
+                with open(path, "w") as f:
+                    for ln in new_lines:
+                        f.write(ln + "\n")
+                fixed += 1
+                logger.info("Fixed margin interest format: %s", path)
+            except OSError as e:
+                logger.warning("Could not write %s: %s", path, e)
+    return fixed
 
 
 # ---------------------------------------------------------------------------

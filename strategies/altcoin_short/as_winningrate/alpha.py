@@ -5,6 +5,7 @@ import csv
 import zipfile
 from collections import deque
 from datetime import datetime, timedelta
+
 # TODO: use modern python type hint. e.g. list[int], dict[str, int], tuple[int, str], set[int], tuple[int, str] | set[int] etc.
 from typing import List, Dict, Set, Optional, Tuple
 
@@ -12,7 +13,7 @@ import numpy as np
 from scipy import stats as sp_stats
 
 from config import BASE_DATA_PATH, ASSET_CLASS, EXCHANGE
-from utils import CryptoFutureDepthData
+from utils import CryptoFutureDepthData, load_depth_snapshot_for_minute
 # endregion
 
 
@@ -160,30 +161,22 @@ class AltcoinShortAlphaModel(AlphaModel):
     def update(self, algorithm: QCAlgorithm, data: Slice) -> List[Insight]:
         insights: List[Insight] = []
 
-        # 1. ALWAYS capture depth data if present in the current slice, regardless of the minute.
-        # This ensures we have the freshest microstructure data available when we do refresh.
-        # NOTE: Slice.get expects a data type (e.g., CryptoFutureDepthData), not a Symbol.
-        #       We first fetch the depth dictionary, then index by the mapped depth Symbol.
-        depth_captured = 0
-        depth_dict = data.get(CryptoFutureDepthData)
+        # 1. Capture streaming depth data from Slice (Works in Backtest and Live)
+        # We look for objects of type CryptoFutureDepthData
+        for kvp in data.get(CryptoFutureDepthData):
+            depth_symbol = kvp.key
+            depth_data = kvp.value
 
-        if depth_dict is None:
-            algorithm.debug(f"[Alpha-Depth] No CryptoFutureDepthData in slice at {algorithm.time}")
-        else:
-            for symbol, depth_symbol in self.depth_custom_symbols.items():
-                bar = depth_dict.get(depth_symbol)
-                if bar is not None:
-                    self.latest_depth[symbol] = bar
-                    depth_captured += 1
-                    algorithm.log(
-                        f"[Alpha-Depth-Flow] Captured depth for {symbol.value} at {algorithm.time} | Total Depth Value: {bar.value:.2f}"
-                    )
+            # Map "BTCUSDT.DEPTH" -> "BTCUSDT"
+            base_ticker = depth_symbol.value.replace(".DEPTH", "")
+            # Find the actual base symbol object tracked in coin_data
+            for s in self.coin_data.keys():
+                if s.value == base_ticker:
+                    self.latest_depth[s] = depth_data
+                    # algorithm.debug(f"[Alpha-Depth] Captured live depth for {base_ticker}")
+                    break
 
-        # Optional periodic heartbeat to confirm depth reception
-        if depth_captured > 0 and algorithm.time.minute % 15 == 0:
-            algorithm.debug(f"[Alpha-Depth] Captured depth for {depth_captured} symbols at {algorithm.time}")
-
-        # 2. Only run the rest of the alpha logic on full-hour bars to reduce noise and cost
+        # 2. Only run the rest of the alpha logic on full-hour bars
         if algorithm.time.minute != 0:
             # Lightweight heartbeat every 30 minutes
             if algorithm.time.minute % 30 == 0:
@@ -433,20 +426,22 @@ class AltcoinShortAlphaModel(AlphaModel):
             if not algorithm.securities.contains_key(symbol):
                 continue
 
-            # Latest depth snapshot for this symbol (may be absent)
-            depth_bar = self.latest_depth.get(symbol)
-
-            if depth_bar is None:
-                algorithm.debug(f"[Alpha-Depth] No depth snapshot for {symbol.value} at refresh at {algorithm.time}")
-                pass
+            # 2. Get the latest depth snapshot (captured in update())
+            depth_data = self.latest_depth.get(symbol)
+            if depth_data is None:
+                algorithm.debug(
+                    f"[Alpha-Depth] No depth data in memory for {symbol.value} at {algorithm.time}"
+                )
             else:
-                algorithm.debug(f"[depth_bar] symbol={symbol.value} depth_bar={depth_bar} at {algorithm.time}")
-                
+                # algorithm.debug(f"[Alpha-Depth] Using captured depth for {symbol.value} | TotalValue={depth_data.value:.2f}")
+                pass
 
-            result = self._calculate_all_factors(algorithm, symbol, depth_bar)
+            result = self._calculate_all_factors(algorithm, symbol, depth_data)
             if result is None:
                 # Keep existing data if available, don't delete
-                algorithm.debug(f"[Alpha] Skip refresh for {symbol.Value} (insufficient history)")
+                algorithm.debug(
+                    f"[Alpha] Skip refresh for {symbol.Value} (insufficient history)"
+                )
                 continue
 
             factor_data, hourly_returns = result
@@ -598,22 +593,23 @@ class AltcoinShortAlphaModel(AlphaModel):
             depth_obi_l5 = 0.0
             depth_spread = 0.0
             depth_micro_price_divergence = 0.0
-            
 
             if depth_bar is not None:
+                # depth_bar = aggregated 10–12 level snapshot from utils Reader (Custom Data).
+                # Captured in update() via data.get(CryptoFutureDepthData) -> latest_depth[symbol].
                 try:
                     percentages = list(getattr(depth_bar, "percentages", []))
                     depths = list(getattr(depth_bar, "depths", []))
                     if percentages and depths and len(percentages) == len(depths):
-                        bid_depth = sum(
-                            d for d, p in zip(depths, percentages) if p < 0
-                        )
-                        ask_depth = sum(
-                            d for d, p in zip(depths, percentages) if p > 0
-                        )
+                        bid_depth = sum(d for d, p in zip(depths, percentages) if p < 0)
+                        ask_depth = sum(d for d, p in zip(depths, percentages) if p > 0)
                         total = bid_depth + ask_depth
                         if total > 0:
                             depth_obi_l5 = (bid_depth - ask_depth) / total
+                        # Optional: near-depth OBI (only |p| <= 2.0) for tighter spread signal:
+                        # near_bid = sum(d for d, p in zip(depths, percentages) if -2.0 <= p < 0)
+                        # near_ask = sum(d for d, p in zip(depths, percentages) if 0 < p <= 2.0)
+                        # near_obi = (near_bid - near_ask) / (near_bid + near_ask) if (near_bid + near_ask) > 0 else 0.0
                         algorithm.debug(
                             f"[Alpha-Depth] calc {symbol.value} "
                             f"bid_depth={bid_depth:.2f} ask_depth={ask_depth:.2f} "
@@ -645,9 +641,7 @@ class AltcoinShortAlphaModel(AlphaModel):
                 "selection_weight": round(selection_weight, 4),
                 "depth_obi_l5": round(depth_obi_l5, 4),
                 "depth_spread": round(depth_spread, 6),
-                "depth_micro_price_divergence": round(
-                    depth_micro_price_divergence, 4
-                ),
+                "depth_micro_price_divergence": round(depth_micro_price_divergence, 4),
             }
 
             algorithm.debug(
