@@ -18,10 +18,30 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-from config import ASSET_CLASS, BASE_DATA_PATH, EXCHANGE
-from config import DATA_LOCATION, PROXIES
+from config import (
+    ASSET_CLASS,
+    BASE_DATA_PATH,
+    CUSTOM_DEPTH_MAP,
+    CUSTOM_QUOTE_MAP,
+    CUSTOM_RESOLUTION_FOLDER,
+    DATA_LOCATION,
+    EXCHANGE,
+    PROXIES,
+)
 
 logger = logging.getLogger(__name__)
+
+# LEAN's data folder (set by engine; use for custom data so Docker mount paths resolve).
+# See https://www.quantconnect.com/docs/v2/lean-cli/datasets/custom-data
+def _lean_data_folder():
+    try:
+        from QuantConnect import Globals
+        folder = getattr(Globals, "data_folder", None) or getattr(Globals, "DataFolder", None)
+        if folder:
+            return folder
+    except Exception:
+        pass
+    return DATA_LOCATION
 
 
 
@@ -29,64 +49,103 @@ def format_symbol(symbol):
     """Convert symbols like BTC/USDT or BTC/USDT:USDT to btcusdt."""
     return symbol.split(":")[0].replace("/", "").lower()
 
+class CryptoFutureQuoteData(PythonData):
+    """
+    Custom quote data for Binance crypto futures.
+    Uses custom layout: data/custom/cryptofuture-quote/<symbol>/minute/<date>_quote.zip
+    """
+    def get_source(self, config, date, is_live_mode):
+        base_symbol = config.symbol.value
+        formatted_symbol = format_symbol(base_symbol)
+        date_str = date.strftime("%Y%m%d")
+        base = _lean_data_folder()
+        parts = ("custom", CUSTOM_QUOTE_MAP, formatted_symbol, CUSTOM_RESOLUTION_FOLDER, f"{date_str}_quote.zip")
+        zip_path = os.path.join(base, *parts).replace("\\", "/")
+        return SubscriptionDataSource(
+            zip_path,
+            SubscriptionTransportMedium.LOCAL_FILE,
+            FileFormat.ZIP_ENTRY_NAME,
+        )
+
+    def reader(self, config, line, date, is_live_mode):
+        """
+        Parse a single quote snapshot.
+        """
+        parts = line.split(",")
+        if len(parts) < 4:
+            return None
+        try:
+            ms_midnight = int(parts[0])
+            bid = float(parts[1])
+            ask = float(parts[2])
+            bid_size = float(parts[3])
+            ask_size = float(parts[4])
+
+            data = CryptoFutureQuoteData()
+            data.symbol = config.symbol
+            data.time = date + timedelta(milliseconds=ms_midnight)
+            data.end_time = data.time + timedelta(milliseconds=60000)
+            data.bid = bid
+            data.ask = ask
+            data.bid_size = bid_size
+            data.ask_size = ask_size
+            return data
+        except ValueError:
+            return None
 
 class CryptoFutureDepthData(PythonData):
     """
     Custom depth snapshot data for Binance crypto futures (LOB L5 aggregate).
 
-    Backtest data (local files, ccxt_data_fetch format)
-    ───────────────────────────────────────────────────
-    - Zip path: DATA_LOCATION/ASSET_CLASS/EXCHANGE/minute/<symbol>/<YYYYMMDD>_depth.zip
-    - CSV inside: ms_midnight, percentage, depth, notional (no header)
+    Backtest: reads from LEAN data folder so Docker mount paths resolve.
+    Path layout (per QuantConnect custom data): data/custom/cryptofuture-depth/<TICKER>/minute/<YYYYMMDD>_depth.zip
+    CSV inside: ms_midnight, percentage, depth, notional (no header).
 
-    Live data (streaming placeholder)
-    ─────────────────────────────────
-    - get_source returns a REST endpoint (to be replaced with real Binance depth API)
-    - reader expects each line to be a JSON object containing aggregated levels:
-        {
-          "timestamp": <ms since epoch>,
-          "percentages": [ ... 10 levels ... ],
-          "depths":      [ ... 10 levels ... ],
-          "notionals":   [ ... 10 levels ... ]
-        }
+    Live: placeholder REST endpoint (replace with real Binance depth API).
     """
 
     def get_source(self, config, date, is_live_mode):
-        """
-        Backtest:
-            - Read from local ccxt_data_fetch depth ZIPs.
-        Live:
-            - Placeholder REST endpoint you can later replace with real Binance depth API.
-        """
-        base_symbol = config.symbol.value
-        formatted_symbol = format_symbol(base_symbol)
-        date_str = date.strftime("%Y%m%d")
-
-        if is_live_mode:
-            # Placeholder: replace with real Binance depth REST endpoint or your proxy.
-            # Each response line should be a JSON object that `reader` can parse.
-            url = f"https://placeholder-depth-endpoint/{formatted_symbol}"
-            return SubscriptionDataSource(
-                url,
-                SubscriptionTransportMedium.REST,
-                FileFormat.CSV,
-            )
-
-        zip_path = os.path.join(
-            DATA_LOCATION,
-            ASSET_CLASS,
-            EXCHANGE,
-            "minute",
-            formatted_symbol,
-            f"{date_str}_depth.zip",
-        )
-
-        # Local ZIP file containing a single CSV; LEAN will decompress and stream lines to reader()
-        return SubscriptionDataSource(
-            zip_path,
+        # QuantConnect rule: never return None (C# null reference). No filesystem use in fallback.
+        _EMPTY_PATH = "/tmp/empty_depth.csv"
+        _empty_source = lambda: SubscriptionDataSource(
+            _EMPTY_PATH,
             SubscriptionTransportMedium.LOCAL_FILE,
             FileFormat.CSV,
         )
+        try:
+            if config is None or date is None:
+                return _empty_source()
+            tt = getattr(config, "tick_type", None)
+            if tt is not None and "openinterest" in str(tt).lower():
+                return _empty_source()
+            symbol_obj = getattr(config, "symbol", None)
+            base_symbol = getattr(symbol_obj, "value", None) if symbol_obj is not None else None
+            if base_symbol is None:
+                return _empty_source()
+            formatted_symbol = format_symbol(str(base_symbol))
+            date_str = (getattr(date, "strftime", None) or (lambda _: ""))("%Y%m%d") if date else ""
+            if not date_str:
+                return _empty_source()
+            if is_live_mode:
+                return SubscriptionDataSource(
+                    f"https://placeholder-depth-endpoint/{formatted_symbol}",
+                    SubscriptionTransportMedium.REST,
+                    FileFormat.CSV,
+                )
+            base = _lean_data_folder()
+            if base is None:
+                return _empty_source()
+            parts = ("custom", CUSTOM_DEPTH_MAP, formatted_symbol, CUSTOM_RESOLUTION_FOLDER, f"{date_str}_depth.zip")
+            zip_path = os.path.join(base, *parts).replace("\\", "/")
+            source_path = f"{zip_path}#{date_str}_depth.csv"
+            out = SubscriptionDataSource(
+                source_path,
+                SubscriptionTransportMedium.LOCAL_FILE,
+                FileFormat.ZIP_ENTRY_NAME,
+            )
+            return out if out is not None else _empty_source()
+        except BaseException:
+            return _empty_source()
 
     def reader(self, config, line, date, is_live_mode):
         """
@@ -232,13 +291,10 @@ class CryptoFutureDepthData(PythonData):
 
 
 def _resolve_data_dir(data_dir=None):
-    """Resolve data directory; fallback to settings.DATA_DIR."""
+    """Resolve data directory; default is DATA_LOCATION (repo data folder)."""
     if data_dir is not None:
         return os.path.normpath(os.path.abspath(data_dir))
-    if os.path.isabs(DATA_DIR):
-        return DATA_DIR
-    base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.normpath(os.path.join(base, DATA_DIR))
+    return DATA_LOCATION
 
 
 def load_trade_data(ticker, start_date, end_date, interval=None, data_dir=None):
@@ -285,30 +341,63 @@ def load_trade_data(ticker, start_date, end_date, interval=None, data_dir=None):
 
 
 def load_quote_data(ticker, start_date, end_date, interval=None, data_dir=None):
-    """Load minute quote (bid/ask) data, with optional resampling."""
+    """
+    Load minute quote (L1 bid/ask) data, with optional resampling.
+
+    Supports:
+    - Custom layout (L1 from ccxt_data_fetch): data/custom/cryptofuture-quote/<ticker>/minute/<date>_quote.zip
+      CSV: ms_midnight, bid, ask, bid_size, ask_size (5 columns).
+    - Legacy layout: <data_dir>/<ticker>/_quote.zip with 11 columns (QuoteBar: bid/ask OHLC + sizes).
+
+    Returns DataFrame with bid_open, bid_high, bid_low, bid_close, bid_size, ask_open, ..., ask_size.
+    """
     resolved = _resolve_data_dir(data_dir)
-    ticker_dir = os.path.join(resolved, ticker.lower())
-    if not os.path.exists(ticker_dir):
-        logger.warning("Data directory %s does not exist.", ticker_dir)
+    ticker_lower = ticker.lower() if isinstance(ticker, str) else str(ticker).lower()
+    # 1) Try custom L1 quote path first
+    custom_quote_dir = os.path.join(
+        resolved, "custom", CUSTOM_QUOTE_MAP, ticker_lower, CUSTOM_RESOLUTION_FOLDER
+    )
+    quote_dir = custom_quote_dir if os.path.isdir(custom_quote_dir) else os.path.join(resolved, ticker_lower)
+    if not os.path.exists(quote_dir):
+        logger.warning("Quote data directory %s does not exist.", quote_dir)
         return None
-    logger.info("Loading quote data for %s from %s", ticker, ticker_dir)
+    logger.info("Loading quote data for %s from %s", ticker, quote_dir)
     all_dfs = []
-    files = sorted([f for f in os.listdir(ticker_dir) if f.endswith("_quote.zip")])
+    files = sorted([f for f in os.listdir(quote_dir) if f.endswith("_quote.zip")])
     for f in files:
         date_str = f.split("_")[0]
-        file_date = datetime.strptime(date_str, "%Y%m%d")
-        if start_date <= file_date <= end_date:
-            
-            df = pd.read_csv(
-                os.path.join(ticker_dir, f), header=None, compression="zip"
-            )
-            df.columns = ["ms","bid_open", "bid_high", "bid_low", "bid_close", "bid_size", "ask_open", "ask_high", "ask_low", "ask_close", "ask_size"]
-            df["time"] = file_date + pd.to_timedelta(df["ms"], unit="ms")
-            df.set_index("time", inplace=True)
-            all_dfs.append(
-                df[["bid_open", "bid_high", "bid_low", "bid_close", "bid_size", "ask_open", "ask_high", "ask_low", "ask_close", "ask_size"]]
-            )
-    
+        try:
+            file_date = datetime.strptime(date_str, "%Y%m%d")
+        except ValueError:
+            continue
+        if not (start_date <= file_date <= end_date):
+            continue
+        path = os.path.join(quote_dir, f)
+        try:
+            df = pd.read_csv(path, header=None, compression="zip")
+        except Exception as e:
+            logger.warning("Failed to read %s: %s", path, e)
+            continue
+        ncol = len(df.columns)
+        if ncol >= 11:
+            df.columns = [
+                "ms", "bid_open", "bid_high", "bid_low", "bid_close", "bid_size",
+                "ask_open", "ask_high", "ask_low", "ask_close", "ask_size",
+            ][:ncol]
+        elif ncol >= 5:
+            # L1 snapshot: ms_midnight, bid, ask, bid_size, ask_size -> synthesize OHLC
+            df.columns = ["ms", "bid", "ask", "bid_size", "ask_size"][:ncol]
+            df["bid_open"] = df["bid_high"] = df["bid_low"] = df["bid_close"] = df["bid"]
+            df["ask_open"] = df["ask_high"] = df["ask_low"] = df["ask_close"] = df["ask"]
+        else:
+            continue
+        df["time"] = file_date + pd.to_timedelta(df["ms"], unit="ms")
+        df.set_index("time", inplace=True)
+        cols = [
+            "bid_open", "bid_high", "bid_low", "bid_close", "bid_size",
+            "ask_open", "ask_high", "ask_low", "ask_close", "ask_size",
+        ]
+        all_dfs.append(df[[c for c in cols if c in df.columns]])
     if not all_dfs:
         return None
     df = pd.concat(all_dfs).sort_index().drop_duplicates()
@@ -354,6 +443,29 @@ def load_hourly_ohlcv(ticker, start_date, end_date, data_dir=None):
 # Module-level cache: (symbol, date_str) -> last_snapshot DataFrame; avoids reloading prev day
 _DEPTH_LAST_SNAPSHOT_CACHE = {}
 
+
+def _load_depth_day_from_disk_only(symbol: str, date_str: str, data_base: str | None = None) -> pd.DataFrame:
+    """
+    Load one day's depth from disk (custom layout). No fetch - returns empty if file missing.
+    Use in LEAN/backtest when fetch_depth_range_cryptofuture is not available.
+    """
+    base = data_base or DATA_LOCATION
+    formatted_symbol = format_symbol(symbol)
+    symbol_dir = os.path.join(base, "custom", CUSTOM_DEPTH_MAP, formatted_symbol, CUSTOM_RESOLUTION_FOLDER)
+    zip_path = os.path.join(symbol_dir, f"{date_str}_depth.zip")
+    if not os.path.exists(zip_path):
+        return pd.DataFrame()
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            csv_name = f"{date_str}_depth.csv"
+            if csv_name not in zf.namelist():
+                return pd.DataFrame()
+            with zf.open(csv_name) as f:
+                return pd.read_csv(f, names=["ms_midnight", "percentage", "depth", "notional"])
+    except Exception as e:
+        logger.debug("_load_depth_day_from_disk_only %s %s: %s", symbol, date_str, e)
+        return pd.DataFrame()
+
 # Module-level buffer for aggregating 10 depth rows into one snapshot
 _DEPTH_SNAPSHOT_BUFFER: dict[tuple, dict] = {}
 
@@ -376,12 +488,13 @@ def _load_depth_data_pandas(symbol: str, date_str: str, pivot=False, ffill=False
     assert resolution == "minute", "Currently only minute resolution is supported for depth data loading."
     def _load_day_file(d_str):
         formatted_symbol = format_symbol(symbol)
-        symbol_dir = os.path.join(DATA_LOCATION, asset_class, exchange, "minute", formatted_symbol)
+        # Custom layout: data/custom/cryptofuture-depth/<symbol>/minute/
+        symbol_dir = os.path.join(DATA_LOCATION, "custom", CUSTOM_DEPTH_MAP, formatted_symbol, CUSTOM_RESOLUTION_FOLDER)
         zip_path = os.path.join(symbol_dir, f"{d_str}_depth.zip")
-        
+
         if not os.path.exists(zip_path):
-            # Attempt to download
-            if exchange == 'binance' and asset_class == 'cryptofuture':
+            # Attempt to download (saves into custom layout when implemented)
+            if exchange == "binance" and asset_class == "cryptofuture":
                 try:
                     dt_obj = datetime.strptime(d_str, "%Y%m%d").replace(tzinfo=timezone.utc)
                     since_ms = int(dt_obj.timestamp() * 1000)
@@ -576,6 +689,57 @@ def _load_depth_data_range_pandas(symbol: str, resolution: str, start: datetime 
             df = df[df['ms_midnight'] % target_ms == 0]
 
     return df
+
+
+def load_depth_snapshot_for_minute(
+    symbol_value: str,
+    dt: datetime,
+    data_base: str | None = None,
+) -> object | None:
+    """
+    Load a single minute's depth snapshot from disk (custom layout).
+    Returns a simple object with .percentages, .depths, .notionals, .value for OBI etc.
+    Use when subscription depth is unavailable (e.g. OpenInterest worker crash).
+    When data_base is None, uses _lean_data_folder() in LEAN context so Docker path matches.
+    """
+    base = data_base if data_base is not None else _lean_data_folder()
+    date_str = dt.strftime("%Y%m%d")
+    ms_midnight = int(
+        (dt.hour * 3600 + dt.minute * 60 + dt.second) * 1000
+        + dt.microsecond / 1000
+    )
+    align_ms = 60000
+    snapped_ms = int(np.ceil(ms_midnight / align_ms) * align_ms)
+    if snapped_ms >= 86400000:
+        snapped_ms = 86400000 - align_ms
+
+    try:
+        df = _load_depth_day_from_disk_only(symbol_value, date_str, data_base=base)
+        if df is None or df.empty:
+            return None
+        df = df.sort_values(["ms_midnight", "percentage"]).drop_duplicates(["ms_midnight", "percentage"], keep="last")
+        df["ms_midnight"] = (np.ceil(df["ms_midnight"].astype(float) / align_ms) * align_ms).astype(int)
+        df = df[df["ms_midnight"] < 86400000]
+        sub = df[df["ms_midnight"] == snapped_ms]
+        if sub.empty:
+            return None
+        if "percentage" in sub.columns and "depth" in sub.columns:
+            sub = sub.sort_values("percentage")
+            percentages = sub["percentage"].astype(float).tolist()
+            depths = sub["depth"].astype(float).tolist()
+            notionals = sub["notional"].astype(float).tolist() if "notional" in sub.columns else [0.0] * len(depths)
+        else:
+            return None
+        total = sum(depths)
+        out = type("DepthSnapshot", (), {})()
+        out.percentages = percentages
+        out.depths = depths
+        out.notionals = notionals
+        out.value = total
+        return out
+    except Exception as e:
+        logger.debug("load_depth_snapshot_for_minute %s %s: %s", symbol_value, dt, e)
+        return None
 
 
 def load_depth_data_range(symbol, start_date, end_date, pivot=False, ffill=False, align_ms=60000, data_dir=None):

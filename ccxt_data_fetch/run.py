@@ -7,17 +7,19 @@ from ccxt_data_fetch.utils import get_top_200_symbols, format_symbol
 from ccxt_data_fetch.fetcher import (
     fetch_ohlcv_range, 
     fetch_funding_rates,
-    save_hour_data, 
-    save_minute_data, 
-    save_daily_data, 
+    save_ohlcv_data,
+    # save_hour_data, 
+    # save_minute_data, 
+    # save_daily_data, 
     save_margin_interest
 )
+import time as ttime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 # datetime set time zone to UTC
 os.environ['TZ'] = 'UTC'
-time.tzset()
+ttime.tzset()
 
 def run_fetch(asset_class, resolution, tick_type="trade"):
     start_dt = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -29,6 +31,7 @@ def run_fetch(asset_class, resolution, tick_type="trade"):
     # 1. Get Symbols
     symbols = get_top_200_symbols(asset_class)
     symbols = symbols[:TOP_N_SYMBOL]
+    logger.info(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Starting fetch: {asset_class} | {resolution} | {tick_type} for {len(symbols)} symbols...")
 
     for symbol in symbols:
@@ -74,12 +77,8 @@ def run_fetch(asset_class, resolution, tick_type="trade"):
             data = fetch_ohlcv_range(symbol, ccxt_timeframe, current_since, until_ms, asset_class)
 
             # Save
-            if resolution == "minute":
-                save_minute_data(symbol, data, asset_class, tick_type)
-            elif resolution == "hour":
-                save_hour_data(symbol, data, asset_class, tick_type)
-            elif resolution == "daily":
-                save_daily_data(symbol, data, asset_class, tick_type)
+            save_ohlcv_data(symbol, data,resolution, asset_class, tick_type)
+
 
         except Exception as e:
             logger.error(f"Failed to process {symbol}: {e}")
@@ -93,25 +92,24 @@ if __name__ == "__main__":
     
     args = sys.argv[1:]
     
-    # Defaults
-    asset_class = "cryptofuture"
-    resolution = "hour"
-    tick_type = "trade"
+    for asset_class in ["cryptofuture", "crypto"]:
+        for resolution in ["minute", "hour", "daily"]:
+            for tick_type in ["trade", "quote"]:
     
-    if len(args) >= 1:
-        # Heuristic: if first arg is 'crypto' or 'cryptofuture', it's asset_class
-        if args[0] in ["crypto", "cryptofuture"]:
-            asset_class = args[0]
-            if len(args) >= 2:
-                resolution = args[1]
-            if len(args) >= 3:
-                tick_type = args[2]
-        else:
-            # Backward compatibility: user might have just passed 'minute' or 'hour'
-            resolution = args[0]
-            if len(args) >= 2:
-                tick_type = args[1]
-            # default asset_class 'cryptofuture' remains
-    
-    print(f"Downloading {asset_class} {resolution} {tick_type} to {DATA_LOCATION}")
-    run_fetch(asset_class, resolution, tick_type)
+                # if len(args) >= 1:
+                #     # Heuristic: if first arg is 'crypto' or 'cryptofuture', it's asset_class
+                #     if args[0] in ["crypto", "cryptofuture"]:
+                #         asset_class = args[0]
+                #         if len(args) >= 2:
+                #             resolution = args[1]
+                #         if len(args) >= 3:
+                #             tick_type = args[2]
+                #     else:
+                #         # Backward compatibility: user might have just passed 'minute' or 'hour'
+                #         resolution = args[0]
+                #         if len(args) >= 2:
+                #             tick_type = args[1]
+                #         # default asset_class 'cryptofuture' remains
+                
+                print(f"Downloading {asset_class} {resolution} {tick_type} to {DATA_LOCATION}")
+                run_fetch(asset_class, resolution, tick_type)

@@ -1,9 +1,15 @@
 import logging
+import time
 import requests
 import ccxt
 from ccxt_data_fetch.config import PROXIES
 
 logger = logging.getLogger(__name__)
+
+# Retry settings for Binance API (helps with proxy/SSL transient errors)
+_BINANCE_LOAD_MARKETS_RETRIES = 5
+_BINANCE_LOAD_MARKETS_RETRY_DELAY_SEC = 3
+_BINANCE_REQUEST_TIMEOUT_MS = 30_000
 
 
 def format_symbol(symbol):
@@ -38,13 +44,32 @@ def get_top_200_symbols(asset_class="cryptofuture"):
         return ["BTC/USDT", "ETH/USDT"]
 
     logger.info(f"Fetching available {asset_class} symbols from Binance...")
-    
+
     options = {}
     if asset_class == "cryptofuture":
         options["defaultType"] = "future"
-    
-    exchange = ccxt.binance({"proxies": PROXIES, "options": options})
-    markets = exchange.load_markets()
+
+    exchange = ccxt.binance({
+        "proxies": PROXIES,
+        "options": options,
+        "timeout": _BINANCE_REQUEST_TIMEOUT_MS,
+    })
+    last_error = None
+    for attempt in range(1, _BINANCE_LOAD_MARKETS_RETRIES + 1):
+        try:
+            markets = exchange.load_markets()
+            break
+        except (requests.exceptions.SSLError, ccxt.NetworkError, ConnectionError) as e:
+            last_error = e
+            if attempt < _BINANCE_LOAD_MARKETS_RETRIES:
+                logger.warning(
+                    f"Binance load_markets attempt {attempt}/{_BINANCE_LOAD_MARKETS_RETRIES} failed ({e}). "
+                    f"Retrying in {_BINANCE_LOAD_MARKETS_RETRY_DELAY_SEC}s..."
+                )
+                time.sleep(_BINANCE_LOAD_MARKETS_RETRY_DELAY_SEC)
+            else:
+                logger.error(f"Binance load_markets failed after {_BINANCE_LOAD_MARKETS_RETRIES} attempts.")
+                raise last_error
 
     matched = []
     for coin_sym in top_symbols:

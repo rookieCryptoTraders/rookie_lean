@@ -170,21 +170,14 @@ class AltcoinShortAlphaModel(AlphaModel):
         if depth_dict is None:
             algorithm.debug(f"[Alpha-Depth] No CryptoFutureDepthData in slice at {algorithm.time}")
         else:
-            algorithm.debug(f"[Alpha-Depth] depth_dict keys={list(depth_dict.keys())} values={list(depth_dict.values())}")
             for symbol, depth_symbol in self.depth_custom_symbols.items():
                 bar = depth_dict.get(depth_symbol)
                 if bar is not None:
                     self.latest_depth[symbol] = bar
                     depth_captured += 1
-                    # DEBUG: Trace the arrival of depth data in the alpha model
                     algorithm.log(
                         f"[Alpha-Depth-Flow] Captured depth for {symbol.value} at {algorithm.time} | Total Depth Value: {bar.value:.2f}"
                     )
-                else:
-                    # algorithm.debug(
-                    #     f"[Alpha-Depth] No depth data for {symbol.value} at {algorithm.time}"
-                    # )
-                    pass
 
         # Optional periodic heartbeat to confirm depth reception
         if depth_captured > 0 and algorithm.time.minute % 15 == 0:
@@ -281,9 +274,9 @@ class AltcoinShortAlphaModel(AlphaModel):
 
             effective_weight = weight * momentum_penalty * depth_boost
 
-            algorithm.debug(
-                f"[Alpha-Weight] {symbol.value} base_w={weight:.3f} co={co_score:.3f} disp={disposition:.3f} obi={depth_obi_l5:.3f} mp={momentum_penalty:.3f} db={depth_boost:.3f} eff_w={effective_weight:.3f}"
-            )
+            # algorithm.debug(
+            #     f"[Alpha-Weight] {symbol.value} base_w={weight:.3f} co={co_score:.3f} disp={disposition:.3f} obi={depth_obi_l5:.3f} mp={momentum_penalty:.3f} db={depth_boost:.3f} eff_w={effective_weight:.3f}"
+            # )
 
             # Relaxed effective weight threshold
             if effective_weight < 0.01:
@@ -443,9 +436,9 @@ class AltcoinShortAlphaModel(AlphaModel):
             # Latest depth snapshot for this symbol (may be absent)
             depth_bar = self.latest_depth.get(symbol)
 
-            algorithm.debug(f"[test] test debug")
             if depth_bar is None:
                 algorithm.debug(f"[Alpha-Depth] No depth snapshot for {symbol.value} at refresh at {algorithm.time}")
+                pass
             else:
                 algorithm.debug(f"[depth_bar] symbol={symbol.value} depth_bar={depth_bar} at {algorithm.time}")
                 

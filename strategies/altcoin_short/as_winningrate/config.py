@@ -1,28 +1,47 @@
 """
-ccxt_data_fetch Configuration
-=============================
-Central configuration for the data fetching package.
+Strategy configuration for as_winningrate (crypto futures).
+All data paths use QuantConnect custom layout; LEAN uses Globals.data_folder in Docker.
 """
 
 import os
-# load .env variables from a .env file if present
 from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================================
 # PATH CONFIGURATION
 # ============================================================================
+# LEAN backtest: custom data paths are under Globals.data_folder (set by lean.json
+# "data-folder": "data"). Ensure the project's data directory is mounted in Docker.
+# Research/scripts: _PROJECT_ROOT and DATA_LOCATION point to repo data folder.
 
-# Root directory for all data storage
-_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))   # strategies/altcoin_short/as_winningrate/
-_PROJECT_ROOT = os.path.join(os.path.dirname(_CONFIG_DIR),"../../")               # /
-DATA_LOCATION = os.path.join(_PROJECT_ROOT, os.getenv("DATA_RELATIVE_LOCATION", "data"))        # data
+_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _find_project_root():
+    """Find directory that contains 'data' so paths work locally and in Docker."""
+    candidate = _CONFIG_DIR
+    while candidate and candidate != os.path.dirname(candidate):
+        if os.path.isdir(os.path.join(candidate, "data")):
+            return candidate
+        candidate = os.path.dirname(candidate)
+    return os.path.normpath(os.path.join(_CONFIG_DIR, "..", "..", ".."))
+
+_PROJECT_ROOT = _find_project_root()
+DATA_LOCATION = os.path.join(_PROJECT_ROOT, os.getenv("DATA_RELATIVE_LOCATION", "data"))
 BASE_DATA_PATH = DATA_LOCATION
 
-# Asset class subdirectory
-ASSET_CLASS = "cryptofuture"
+# ============================================================================
+# CUSTOM DATA LAYOUT (QuantConnect)
+# ============================================================================
+# Depth and quote data: data/custom/<MAP>/<TICKER>/minute/<YYYYMMDD>_*.zip
+# Use this layout so LEAN's FileSystemDataFeed and Docker mounts resolve correctly.
+# See DATA_LAYOUT.md in this directory.
 
-# Exchange
+CUSTOM_DEPTH_MAP = "cryptofuture-depth"
+CUSTOM_QUOTE_MAP = "cryptofuture-quote"
+CUSTOM_RESOLUTION_FOLDER = "minute"
+
+# Legacy (for reference / research scripts only; PythonData get_source uses custom layout)
+ASSET_CLASS = "cryptofuture"
 EXCHANGE = "binance"
 
 # ============================================================================

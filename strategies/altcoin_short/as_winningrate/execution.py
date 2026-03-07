@@ -160,10 +160,16 @@ class SmartSpreadExecutionModel(ExecutionModel):
 
     def _check_spread(self, algorithm: QCAlgorithm, security) -> bool:
         """
-        检查买卖价差是否在可接受范围内
+        检查买卖价差是否在可接受范围内。
+        Live: 使用 Security.BidPrice/AskPrice（经纪商推送）.
+        Backtest: 若无 bid/ask 则尝试从 L1 quote 缓存读取（CryptoFutureQuoteData）.
         """
         bid = security.BidPrice
         ask = security.AskPrice
+        if (bid <= 0 or ask <= 0) and getattr(algorithm, "_last_quote", None):
+            cached = algorithm._last_quote.get(security.Symbol, (0, 0))
+            if cached[0] > 0 and cached[1] > 0:
+                bid, ask = cached[0], cached[1]
 
         # 如果没有 bid/ask 数据，直接通过（使用 last price）
         if bid <= 0 or ask <= 0:

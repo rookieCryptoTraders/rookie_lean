@@ -36,8 +36,12 @@ END_DATE = "2026-02-22"
 # NETWORK
 # ============================================================================
 
-PROXY = "http://127.0.0.1:1082"
-PROXIES = {"http": PROXY, "https": PROXY}
+# Proxy: set PROXY in .env or USE_PROXY=false to disable. Use PROXY= to run without proxy.
+_PROXY_RAW = os.getenv("PROXY", "http://127.0.0.1:1082").strip()
+USE_PROXY = os.getenv("USE_PROXY", "true").lower() in ("1", "true", "yes")
+PROXY = _PROXY_RAW if (USE_PROXY and _PROXY_RAW) else ""
+PROXIES = {"http": PROXY, "https": PROXY} if PROXY else {}
+# When proxy is disabled, requests in fetcher/downloader use no proxy (direct connection).
 
 # Request timeout in seconds
 REQUEST_TIMEOUT = 15
@@ -88,7 +92,7 @@ DEFAULT_TICKERS = [
     "MKRUSDT",
     "LDOUSDT",
 ]
-TOP_N_SYMBOL=2
+TOP_N_SYMBOL=10
 
 # Ticker name mapping (for rebranded assets)
 TICKER_ALIASES = {
@@ -118,3 +122,11 @@ VALID_TIMEFRAMES = [
 
 # Default timeframe
 DEFAULT_TIMEFRAME = "1h"
+
+# ============================================================================
+# L1 QUOTE (custom layout for LEAN strategy)
+# ============================================================================
+# Saves to DATA_LOCATION/custom/<QUOTE_CUSTOM_MAP>/<symbol>/minute/<date>_quote.zip
+# Strategy expects CUSTOM_QUOTE_MAP = "cryptofuture-quote" (see strategies/.../config.py).
+QUOTE_CUSTOM_MAP = "cryptofuture-quote"
+QUOTE_RESOLUTION_FOLDER = "minute"

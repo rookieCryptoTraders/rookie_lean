@@ -5,10 +5,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from config import START_DATE, END_DATE, DATA_LOCATION, TOP_N_SYMBOL
 from utils import get_top_200_symbols, format_symbol
-from fetcher import (
-    fetch_depth_range_cryptofuture,
-    save_depth_data
-)
+from fetcher import fetch_and_save_depth_range
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -16,64 +13,45 @@ logger = logging.getLogger(__name__)
 os.environ['TZ'] = 'UTC'
 time.tzset()
 
-def run_fetch_depth(start_dt,end_dt,asset_class="cryptofuture"):
+def run_fetch_depth(start_dt, end_dt, asset_class: str = "cryptofuture", force_redownload: bool = False):
     """
     Fetches and saves book depth data for top symbols.
-    Adheres to 'only minute data' by using step_ms=60000.
+    When force_redownload=False, resumes from the day after the latest existing depth file.
+    When force_redownload=True, redownloads and overwrites all depth data in the date range.
     """
 
     since_ms = int(start_dt.timestamp() * 1000)
     until_ms = int(end_dt.timestamp() * 1000)
 
-    # 1. Get Symbols
     symbols = get_top_200_symbols(asset_class)
     symbols = symbols[:TOP_N_SYMBOL]
-    logger.info(f"Starting DEPTH fetch: {asset_class} from {START_DATE} to {END_DATE} for {len(symbols)} symbols...")
+    mode = "REDOWNLOAD" if force_redownload else "fetch"
+    logger.info(
+        f"Starting DEPTH {mode}: {asset_class} from {START_DATE} to {END_DATE} for {len(symbols)} symbols..."
+    )
 
     for symbol in symbols:
         try:
-            formatted_symbol = format_symbol(symbol)
-            
-            # Resume Logic: Check existing files to avoid re-downloading
-            symbol_dir = os.path.join(DATA_LOCATION, asset_class, "binance", "minute", formatted_symbol)
-            current_since = since_ms
-            if os.path.exists(symbol_dir):
-                existing = [f for f in os.listdir(symbol_dir) if f.endswith("_depth.zip")]
-                if existing:
-                    latest_zip = sorted(existing)[-1]
-                    latest_date = latest_zip.split("_")[0]
-                    try:
-                        latest_dt = datetime.strptime(latest_date, "%Y%m%d").replace(tzinfo=timezone.utc)
-                        # Start from the day after the latest downloaded file
-                        resume_ms = int((latest_dt + timedelta(days=1)).timestamp() * 1000)
-                        if resume_ms >= until_ms:
-                            logger.info(f"Skipping {symbol}, depth already up to date up to {latest_date}.")
-                            continue
-                        current_since = max(current_since, resume_ms)
-                    except ValueError:
-                        pass
-
-            # Fetch depth snapshots
-            # step_ms=60000 ensures minute-level alignment and triggers 'only minute' filtering in fetcher
-            data = fetch_depth_range_cryptofuture(symbol, current_since, until_ms)
-
-            # Save to LEAN format (data is dict: date_str_yyyymmdd -> DataFrame)
-            if data:
-                for date_str, depth_df in data.items():
-                    save_depth_data(symbol, date_str, depth_df, asset_class=asset_class)
-                logger.info(f"Successfully saved depth data for {symbol}.")
-            else:
-                logger.info(f"No new depth data fetched for {symbol}.")
-
+            fetch_and_save_depth_range(
+                symbol,
+                since_ms,
+                until_ms,
+                asset_class=asset_class,
+                force_redownload=force_redownload,
+            )
         except Exception as e:
             logger.error(f"Failed to process depth for {symbol}: {e}")
 
 if __name__ == "__main__":
-    # Usage: python -m ccxt_data_fetch.run_depth [asset_class]
-    asset_class = sys.argv[1] if len(sys.argv) > 1 else "cryptofuture"
-    
+    # Usage: python -m ccxt_data_fetch.run_depth [asset_class] [--redownload]
+    args = [a for a in sys.argv[1:] if a != "--redownload"]
+    force_redownload = "--redownload" in sys.argv
+    asset_class = args[0] if args else "cryptofuture"
+
     start_dt = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    
-    print(f"Downloading depth data for {asset_class} (Minute resolution) to {DATA_LOCATION}")
-    run_fetch_depth(start_dt, end_dt, asset_class=asset_class)
+
+    print(
+        f"{'Redownloading' if force_redownload else 'Downloading'} depth data for {asset_class} (minute) to {DATA_LOCATION}"
+    )
+    run_fetch_depth(start_dt, end_dt, asset_class=asset_class, force_redownload=force_redownload)
