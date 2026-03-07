@@ -101,7 +101,20 @@ python -m ccxt_data_fetch.run cryptofuture daily
 python -m ccxt_data_fetch.run cryptofuture margin_interest
 ```
 
-  2. Spot Data
+  2. Depth and L1 Quote (for strategies that need order-book / top-of-book data)
+
+```bash
+# Depth (Binance Vision bookDepth → data/.../minute/<symbol>/<date>_depth.zip)
+python -m ccxt_data_fetch.run_depth cryptofuture
+
+# Cryptofuture minute quote (Binance Vision bookTicker → data/cryptofuture/binance/minute/<symbol>/<date>_quote.zip)
+# Tries Binance Vision first; if 404, saves one current snapshot from REST.
+python -m ccxt_data_fetch.run_quote cryptofuture
+```
+
+Minute quote CSV (LEAN QuoteBar): `Time (ms since midnight), BidOpen, BidHigh, BidLow, BidClose, BidSize, AskOpen, AskHigh, AskLow, AskClose, AskSize`.
+
+  3. Spot Data
 
 ```python
 # Minute Resolution
@@ -115,7 +128,7 @@ python -m ccxt_data_fetch.run crypto daily
 ```
 
 
-  3. Specifying Tick Type (e.g., for folder structure compliance)
+  4. Specifying Tick Type (e.g., for folder structure compliance)
 
 ```python
 # Saves as ..._quote.zip (Note: Data is still OHLCV trades)

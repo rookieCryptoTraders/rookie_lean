@@ -7,6 +7,7 @@ This workspace is set up for algorithmic trading on Binance using the QuantConne
 - **Lean CLI**: Installed and configured.
 - **Organization**: Chen Zhao (ID: `32428d7ae019266d4f87b05be51fb41c`)
 - **Credentials**: Stored in `~/.lean/credentials` and `.env`.
+- **Language**: All files should be written in **English**, any other languages should be translated into English.
 
 ## Directory Structure
 - `BinanceBot/`: Your main trading algorithm.
