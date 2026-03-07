@@ -39,15 +39,13 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
     """
 
     def initialize(self) -> None:
-        # Trace/verbose: log all details (DEBUG from utils/alpha + LEAN self.debug)
         log_level = (
-            (self.get_parameter("log-level", "debug") or "debug").strip().upper()
+            (self.get_parameter("log-level", "info") or "info").strip().upper()
         )
         if log_level in ("DEBUG", "TRACE", "VERBOSE", "1", "0"):
             logging.getLogger().setLevel(logging.DEBUG)
             for name in ("__main__", "utils", "alpha"):
                 logging.getLogger(name).setLevel(logging.DEBUG)
-            self.debug("[Init] Log level set to DEBUG (trace/verbose)")
 
         self.counter = 0
         self.set_time_zone("UTC")
@@ -94,11 +92,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         tickers = [
             "BTCUSDT",  # debug: only BTCUSDT to validate depth custom data
         ]
-        # Depth data path is resolved in utils.CryptoFutureDepthData.get_source using LEAN's data folder
-        self.debug(
-            f"[Init] Config: _CONFIG_DIR={_CONFIG_DIR}, _PROJECT_ROOT={_PROJECT_ROOT}, BASE_DATA_PATH={BASE_DATA_PATH}"
-        )
-
         added_count = 0
         alpha_symbols_to_register = []  # List to hold all symbols (base, depth, quote) for alpha model
         for ticker in tickers:
@@ -136,11 +129,8 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
                 alpha_symbols_to_register.append(quote_security.symbol)
 
                 added_count += 1
-                self.debug(f"[Init] Added CryptoFuture: {ticker}. symbol: {symbol}")
             except Exception as e:
                 self.debug(f"[Init] Failed to add {ticker}: {e}")
-
-        self.debug(f"[Init] Total CryptoFutures added: {added_count}/{len(tickers)}")
 
         # Benchmark: use lambda over our subscribed BTCUSDT so series align with performance
         # (avoids StatisticsBuilder "1 misaligned values" from separate Hour benchmark feed)
@@ -156,10 +146,8 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
                 return 1.0
 
             self.set_benchmark(_benchmark_value)
-            self.debug("[Init] Benchmark set to BTCUSDT (lambda from subscribed security)")
         else:
             self.set_benchmark(lambda dt: 1.0)
-            self.debug("[Init] No symbol for benchmark; using constant 1.0")
 
         # 简单 warm-up，确保 EMA 等指标准备就绪
         self.set_warm_up(timedelta(days=1))
@@ -174,12 +162,9 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
             self._log_status,
         )
 
-        self.debug("=" * 60)
         self.debug(
-            f"Altcoin Short (AlphaModel + on_data execute) Initialized | "
-            f"Positions: {max_positions} | Leverage: {leverage}x"
+            f"Altcoin Short initialized | Positions: {max_positions} | Leverage: {leverage}x"
         )
-        self.debug("=" * 60)
 
     def _log_status(self) -> None:
         """定时状态日志"""
@@ -205,9 +190,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
             return
 
         self.counter += 1
-        if self.counter % 1000 == 0:
-            self.debug(f"[OnData] Heartbeat at {self.time}")
-
         now = self.time.replace(second=0, microsecond=0)
 
         # Update L1 quote cache from custom quote data (for execution spread check in backtest)
@@ -223,12 +205,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         # 这里只读取最新的 insights，不再手动触发 update。
         insights = list(self.alpha_model.latest_insights)
         if not insights:
-            # Brief heartbeat to show we are reading alpha output
-            if self.counter % 60 == 0:
-                self.debug(
-                    f"[OnData] no insights | time={self.time} | "
-                    f"alpha_pool={len(self.alpha_model.coin_data)}"
-                )
             return
 
         # 只保留做空类 insight，按权重排序，限制最大标的数量
@@ -304,9 +280,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
     def on_end_of_algorithm(self) -> None:
         """策略结束回调"""
-        self.debug("=" * 60)
-        self.debug("Altcoin Short Strategy Completed")
         self.debug(
-            f"Final Portfolio Value: ${self.portfolio.total_portfolio_value:,.2f}"
+            f"Altcoin Short completed | Final value: ${self.portfolio.total_portfolio_value:,.2f}"
         )
-        self.debug("=" * 60)

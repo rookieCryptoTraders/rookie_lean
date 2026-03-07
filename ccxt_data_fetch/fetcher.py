@@ -398,11 +398,9 @@ def save_ohlcv_data(symbol, ohlcv_data, resolution, asset_class="cryptofuture", 
         if resolution == "daily":
             df["time_val"] = df["dt"].dt.strftime("%Y%m%d 00:00")
             zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
-        else: # hour
+        else:  # hour
             df["time_val"] = df["dt"].dt.strftime("%Y%m%d %H:%M")
-            primary_tick = "quote" if asset_class in ["forex", "cfd"] else "trade"
-            suffix = f"_{tick_type}" if tick_type != primary_tick else ""
-            zip_path = os.path.join(base_dir, f"{formatted_symbol}{suffix}.zip")
+            zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
             
         csv_filename = f"{formatted_symbol}.csv"
         lean_df = get_lean_df(df, asset_class, tick_type, "time_val")
@@ -617,6 +615,12 @@ def fetch_bookticker_range_binance_vision(
                     logger.debug("No Vision bookTicker for %s on %s (404)", symbol, date_str)
                 current += timedelta(days=1)
                 continue
+            # Binance Vision can return 200 with an XML error body (NoSuchKey) when the file does not exist
+            body = response.content[:1000] if response.content else b""
+            if b"<Error>" in body or b"NoSuchKey" in body or body.strip().startswith(b"<?xml"):
+                logger.debug("No Vision bookTicker for %s on %s (no such key)", symbol, date_str)
+                current += timedelta(days=1)
+                continue
             with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
                 names = zf.namelist()
                 entry = names[0] if names else None
@@ -629,6 +633,8 @@ def fetch_bookticker_range_binance_vision(
             if "timestamp" in raw.columns and "bid_price" in raw.columns and "ask_price" in raw.columns:
                 out[date_compact] = raw
                 logger.info("Fetched Vision bookTicker for %s on %s (%d rows)", symbol, date_str, len(raw))
+        except zipfile.BadZipFile:
+            logger.debug("No Vision bookTicker for %s on %s (invalid zip / no such key)", symbol, date_str)
         except Exception as e:
             logger.warning("Vision bookTicker %s %s: %s", symbol, date_str, e)
         current += timedelta(days=1)
