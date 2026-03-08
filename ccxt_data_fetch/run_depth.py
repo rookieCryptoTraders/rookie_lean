@@ -1,11 +1,13 @@
+import argparse
 import logging
 import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
-from config import START_DATE, END_DATE, DATA_LOCATION, TOP_N_SYMBOL
-from utils import get_top_200_symbols, format_symbol
-from fetcher import fetch_and_save_depth_range
+
+from ccxt_data_fetch.config import START_DATE, END_DATE, DATA_LOCATION, TOP_N_SYMBOL
+from ccxt_data_fetch.utils import get_top_200_symbols, format_symbol
+from ccxt_data_fetch.fetcher import fetch_and_save_depth_range
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,7 +29,12 @@ def run_fetch_depth(start_dt, end_dt, asset_class: str = "cryptofuture", force_r
     symbols = symbols[:TOP_N_SYMBOL]
     mode = "REDOWNLOAD" if force_redownload else "fetch"
     logger.info(
-        f"Starting DEPTH {mode}: {asset_class} from {START_DATE} to {END_DATE} for {len(symbols)} symbols..."
+        "Starting DEPTH %s: %s from %s to %s for %s symbols...",
+        mode,
+        asset_class,
+        start_dt.date(),
+        end_dt.date(),
+        len(symbols),
     )
 
     for symbol in symbols:
@@ -43,15 +50,22 @@ def run_fetch_depth(start_dt, end_dt, asset_class: str = "cryptofuture", force_r
             logger.error(f"Failed to process depth for {symbol}: {e}")
 
 if __name__ == "__main__":
-    # Usage: python -m ccxt_data_fetch.run_depth [asset_class] [--redownload]
-    args = [a for a in sys.argv[1:] if a != "--redownload"]
-    force_redownload = "--redownload" in sys.argv
-    asset_class = args[0] if args else "cryptofuture"
+    parser = argparse.ArgumentParser(description="Fetch depth data for cryptofuture.")
+    parser.add_argument("asset_class", nargs="?", default="cryptofuture", help="Asset class (default: cryptofuture)")
+    parser.add_argument("--start", default=None, help="Start date YYYY-MM-DD (default: config.START_DATE)")
+    parser.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: config.END_DATE)")
+    parser.add_argument("--redownload", action="store_true", help="Force redownload and overwrite")
+    args = parser.parse_args()
 
-    start_dt = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    start_str = args.start or START_DATE
+    end_str = args.end or END_DATE
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-    print(
-        f"{'Redownloading' if force_redownload else 'Downloading'} depth data for {asset_class} (minute) to {DATA_LOCATION}"
+    logger.info(
+        "%s depth data for %s (minute) to %s",
+        "Redownloading" if args.redownload else "Downloading",
+        args.asset_class,
+        DATA_LOCATION,
     )
-    run_fetch_depth(start_dt, end_dt, asset_class=asset_class, force_redownload=force_redownload)
+    run_fetch_depth(start_dt, end_dt, asset_class=args.asset_class, force_redownload=args.redownload)

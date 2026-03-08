@@ -398,9 +398,11 @@ def save_ohlcv_data(symbol, ohlcv_data, resolution, asset_class="cryptofuture", 
         if resolution == "daily":
             df["time_val"] = df["dt"].dt.strftime("%Y%m%d 00:00")
             zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
-        else:  # hour
+        elif resolution == "hour":
             df["time_val"] = df["dt"].dt.strftime("%Y%m%d %H:%M")
             zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
+        else:
+            raise ValueError(f"Unsupported resolution: {resolution}")
             
         csv_filename = f"{formatted_symbol}.csv"
         lean_df = get_lean_df(df, asset_class, tick_type, "time_val")

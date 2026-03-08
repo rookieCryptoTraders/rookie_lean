@@ -8,8 +8,9 @@ Fetch cryptofuture quote (best bid/ask) from Binance and save as QuantConnect mi
   AskOpen, AskHigh, AskLow, AskClose, AskSize (LEAN minute quote format).
 
 Usage:
-  python -m ccxt_data_fetch.run_quote [asset_class] [--redownload]
+  python -m ccxt_data_fetch.run_quote [asset_class] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--redownload]
 """
+import argparse
 import logging
 import os
 import sys
@@ -68,23 +69,27 @@ def run_fetch_quote(
 
 
 if __name__ == "__main__":
-    # Usage: python -m ccxt_data_fetch.run_quote [asset_class] [--redownload]
-    args = [a for a in sys.argv[1:] if a != "--redownload"]
-    force_redownload = "--redownload" in sys.argv
-    asset_class = args[0] if args else "cryptofuture"
+    parser = argparse.ArgumentParser(description="Fetch L1 quote data for cryptofuture.")
+    parser.add_argument("asset_class", nargs="?", default="cryptofuture", help="Asset class (default: cryptofuture)")
+    parser.add_argument("--start", default=None, help="Start date YYYY-MM-DD (default: config.START_DATE)")
+    parser.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: config.END_DATE)")
+    parser.add_argument("--redownload", action="store_true", help="Force redownload and overwrite")
+    args = parser.parse_args()
 
-    start_dt = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+    start_str = args.start or START_DATE
+    end_str = args.end or END_DATE
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
 
     logger.info(
         "%s L1 quote data for %s (minute) to %s",
-        "Redownloading" if force_redownload else "Building",
-        asset_class,
+        "Redownloading" if args.redownload else "Building",
+        args.asset_class,
         DATA_LOCATION,
     )
     run_fetch_quote(
         start_dt,
         end_dt,
-        asset_class=asset_class,
-        force_redownload=force_redownload,
+        asset_class=args.asset_class,
+        force_redownload=args.redownload,
     )

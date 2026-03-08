@@ -2,6 +2,7 @@
 Fetch OHLCV (trade or quote tick type) for crypto/cryptofuture from Binance via CCXT.
 Saves to LEAN format under data/<asset_class>/binance/<resolution>/.
 """
+import argparse
 import logging
 import os
 import sys
@@ -18,9 +19,17 @@ os.environ["TZ"] = "UTC"
 ttime.tzset()
 
 
-def run_fetch_ohlcv(asset_class: str, resolution: str, tick_type: str = "trade") -> None:
-    start_dt = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+def run_fetch_ohlcv(
+    asset_class: str,
+    resolution: str,
+    tick_type: str = "trade",
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> None:
+    start_str = start_date or START_DATE
+    end_str = end_date or END_DATE
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
     since_ms = int(start_dt.timestamp() * 1000)
     until_ms = int(end_dt.timestamp() * 1000)
 
@@ -68,14 +77,19 @@ def run_fetch_ohlcv(asset_class: str, resolution: str, tick_type: str = "trade")
 
 
 if __name__ == "__main__":
-    # Usage: python -m ccxt_data_fetch.run_ohlcv [asset_class] [resolution] [tick_type]
-    # Examples:
-    #   python -m ccxt_data_fetch.run_ohlcv cryptofuture minute trade
-    #   python -m ccxt_data_fetch.run_ohlcv crypto daily trade
-    args = sys.argv[1:]
-    asset_class = args[0] if len(args) >= 1 else "cryptofuture"
-    resolution = args[1] if len(args) >= 2 else "minute"
-    tick_type = args[2] if len(args) >= 3 else "trade"
+    parser = argparse.ArgumentParser(description="Fetch OHLCV data for crypto/cryptofuture.")
+    parser.add_argument("asset_class", nargs="?", default="cryptofuture", help="Asset class")
+    parser.add_argument("resolution", nargs="?", default="minute", help="Resolution: minute, hour, daily")
+    parser.add_argument("tick_type", nargs="?", default="trade", help="Tick type: trade or quote")
+    parser.add_argument("--start", default=None, help="Start date YYYY-MM-DD (default: config.START_DATE)")
+    parser.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: config.END_DATE)")
+    args = parser.parse_args()
 
-    logger.info("Downloading OHLCV %s %s %s to %s", asset_class, resolution, tick_type, DATA_LOCATION)
-    run_fetch_ohlcv(asset_class, resolution, tick_type)
+    logger.info("Downloading OHLCV %s %s %s to %s", args.asset_class, args.resolution, args.tick_type, DATA_LOCATION)
+    run_fetch_ohlcv(
+        args.asset_class,
+        args.resolution,
+        args.tick_type,
+        start_date=args.start,
+        end_date=args.end,
+    )
