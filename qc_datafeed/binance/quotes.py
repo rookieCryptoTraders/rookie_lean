@@ -341,6 +341,7 @@ def build_minute_quote_from_aggtrades_files(
     date_str: str,
     asset_class: str = "cryptofuture",
     static_spread: float = 0.5,
+    redownload: bool = False,
 ) -> None:
     """
     Rebuild LEAN-compatible minute QuoteBars for one symbol/day from local aggTrades files.
@@ -358,6 +359,25 @@ def build_minute_quote_from_aggtrades_files(
     date_yyyymmdd = date_str.replace("-", "")
 
     formatted_symbol = _format_symbol(symbol)
+
+    # Output quote path (skip if it already exists and redownload is False).
+    quote_dir = os.path.join(
+        DATA_ROOT,
+        asset_class,
+        "binance",
+        "minute",
+        formatted_symbol,
+    )
+    quote_zip = os.path.join(quote_dir, f"{date_yyyymmdd}_quote.zip")
+    if os.path.isfile(quote_zip) and not redownload:
+        logger.info(
+            "build_minute_quote_from_aggtrades_files: quote already exists for %s on %s at %s; skipping",
+            symbol,
+            date_yyyymmdd,
+            quote_zip,
+        )
+        return
+
     agg_dir = os.path.join(
         DATA_ROOT,
         asset_class,

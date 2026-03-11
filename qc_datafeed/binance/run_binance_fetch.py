@@ -474,13 +474,17 @@ def run_fetch(
                     elif data_type == "metrics":
                         _fetch_futures_metrics(symbol, date_str, margin_type, redownload)
                     elif data_type == "quote":
-                        # Quote bars are rebuilt from previously downloaded aggTrades files.
-                        # Resolution is effectively "minute" and the resolution argument is ignored.
+                        # Quote bars are rebuilt from aggTrades. Ensure underlying aggTrades
+                        # exist first (this call is idempotent and respects redownload).
+                        _fetch_futures_agg_trades(symbol, date_str, margin_type, redownload, ts_format)
+
+                        # Resolution is effectively "minute" for output quote bars.
                         date_yyyymmdd = date_str.replace("-", "")
                         build_minute_quote_from_aggtrades_files(
                             symbol=symbol,
                             date_str=date_yyyymmdd,
                             asset_class=asset_class,
+                            redownload=redownload,
                         )
                 except Exception as e:
                     logger.warning("Failed %s %s %s: %s", symbol, date_str, data_type, e)
@@ -495,11 +499,15 @@ def run_fetch(
                     elif data_type == "aggTrades":
                         _fetch_spot_agg_trades(symbol, date_str, redownload, ts_format)
                     else:  # quote
+                        # Ensure underlying aggTrades exist first (idempotent).
+                        _fetch_spot_agg_trades(symbol, date_str, redownload, ts_format)
+
                         date_yyyymmdd = date_str.replace("-", "")
                         build_minute_quote_from_aggtrades_files(
                             symbol=symbol,
                             date_str=date_yyyymmdd,
                             asset_class=asset_class,
+                            redownload=redownload,
                         )
                 except Exception as e:
                     logger.warning("Failed %s %s %s: %s", symbol, date_str, data_type, e)
