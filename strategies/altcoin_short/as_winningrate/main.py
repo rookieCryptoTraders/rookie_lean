@@ -7,8 +7,7 @@ from alpha import AltcoinShortAlphaModel
 import time as ttime
 import os
 
-from config import ASSET_CLASS, BASE_DATA_PATH, EXCHANGE
-from config import DATA_LOCATION, PROXIES, _CONFIG_DIR, _PROJECT_ROOT
+from config import ASSET_CLASS, BASE_DATA_PATH, EXCHANGE, DATA_LOCATION, PROXIES, _CONFIG_DIR, _PROJECT_ROOT, START_DATE, END_DATE
 
 # datetime set time zone to UTC
 os.environ["TZ"] = "UTC"
@@ -49,8 +48,8 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         self.counter = 0
         self.set_time_zone("UTC")
-        self.set_start_date(2026, 1, 15)
-        self.set_end_date(2026, 1, 15)
+        self.set_start_date(year=int(START_DATE.split("-")[0]), month=int(START_DATE.split("-")[1]), day=int(START_DATE.split("-")[2]))
+        self.set_end_date(year=int(END_DATE.split("-")[0]), month=int(END_DATE.split("-")[1]), day=int(END_DATE.split("-")[2]))
         self.set_account_currency("USDT")
         self.set_cash(100000)  # 100k USDT
 
@@ -68,10 +67,12 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         max_positions = int(self.get_parameter("max-positions", 5))
         leverage = int(self.get_parameter("leverage", 2))
         cooldown_minutes = float(self.get_parameter("cooldown-minutes", 60.0))
+        stop_loss_pct = float(self.get_parameter("stop-loss-pct", 0.10))
 
         self._max_positions = max_positions
         self._position_size = 1.0 / max_positions
         self._cooldown_minutes = cooldown_minutes
+        self._stop_loss_pct = stop_loss_pct
 
         # 订阅合约并为每个交易标的创建简单指标容器
         self.symbols: list[Symbol] = []
@@ -141,8 +142,19 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         if btc_sym is not None:
 
             def _benchmark_value(dt: datetime) -> float:
-                if btc_sym in self.securities and self.securities[btc_sym].price:
-                    return float(self.securities[btc_sym].price)
+                security = self.securities.get(btc_sym)
+                if security is None:
+                    return 1.0
+
+                # Prefer the close price of the BTCUSDT perpetual crypto future
+                close_price = getattr(security, "close", None)
+                if close_price:
+                    return float(close_price)
+
+                # Fallback to the generic security price if close is unavailable
+                if security.price:
+                    return float(security.price)
+
                 return 1.0
 
             self.set_benchmark(_benchmark_value)
@@ -191,6 +203,18 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         self.counter += 1
         now = self.time.replace(second=0, microsecond=0)
+
+        # Hard stop-loss per short position (percentage of entry cost)
+        for holding in self.portfolio.values():
+            if not holding.invested or holding.quantity >= 0:
+                continue
+            cost = abs(holding.holdings_cost)
+            if cost <= 0:
+                continue
+            pnl_pct = holding.unrealized_profit / cost
+            if pnl_pct < -self._stop_loss_pct:
+                self.set_holdings(holding.symbol, 0.0)
+                self._last_trade_time[holding.symbol] = now
 
         # Update L1 quote cache from custom quote data (for execution spread check in backtest)
         quote_dict = data.get(CryptoFutureQuoteData)

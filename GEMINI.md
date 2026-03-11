@@ -101,7 +101,7 @@ Pre-built example strategies for learning and reference:
 ### 1. Download Crypto Futures Data
 ```bash
 cd ccxt_data_fetch
-python -m ccxt_data_fetch.run minute  # or 'hour'
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute trade  # or hour for hourly
 ```
 Data is automatically formatted and saved to `data/cryptofuture/binance/`
 

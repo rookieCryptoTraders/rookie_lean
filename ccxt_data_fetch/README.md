@@ -89,27 +89,27 @@ Tick 数据分为 `trade` 和 `quote` 两种文件。
 
 ```python
 # Minute Resolution
-python -m ccxt_data_fetch.run cryptofuture minute
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute trade
 
 # Hourly Resolution
-python -m ccxt_data_fetch.run cryptofuture hour
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv hour trade
 
 # Daily Resolution
-python -m ccxt_data_fetch.run cryptofuture daily
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv daily trade
 
 # Margin Interest (Funding Rates)
-python -m ccxt_data_fetch.run cryptofuture margin_interest
+python -m ccxt_data_fetch.run_fetch cryptofuture margin_interest
 ```
 
   2. Depth and L1 Quote (for strategies that need order-book / top-of-book data)
 
 ```bash
 # Depth (Binance Vision bookDepth → data/.../minute/<symbol>/<date>_depth.zip)
-python -m ccxt_data_fetch.run_depth cryptofuture
+python -m ccxt_data_fetch.run_fetch cryptofuture depth minute
 
 # Cryptofuture minute quote (Binance Vision bookTicker → data/cryptofuture/binance/minute/<symbol>/<date>_quote.zip)
 # Tries Binance Vision first; if 404, saves one current snapshot from REST.
-python -m ccxt_data_fetch.run_quote cryptofuture
+python -m ccxt_data_fetch.run_fetch cryptofuture quote minute
 ```
 
 Minute quote CSV (LEAN QuoteBar): `Time (ms since midnight), BidOpen, BidHigh, BidLow, BidClose, BidSize, AskOpen, AskHigh, AskLow, AskClose, AskSize`.
@@ -118,13 +118,13 @@ Minute quote CSV (LEAN QuoteBar): `Time (ms since midnight), BidOpen, BidHigh, B
 
 ```python
 # Minute Resolution
-python -m ccxt_data_fetch.run crypto minute
+python -m ccxt_data_fetch.run_fetch crypto ohlcv minute trade
 
 # Hourly Resolution
-python -m ccxt_data_fetch.run crypto hour
+python -m ccxt_data_fetch.run_fetch crypto ohlcv hour trade
 
 # Daily Resolution
-python -m ccxt_data_fetch.run crypto daily
+python -m ccxt_data_fetch.run_fetch crypto ohlcv daily trade
 ```
 
 
@@ -132,5 +132,5 @@ python -m ccxt_data_fetch.run crypto daily
 
 ```python
 # Saves as ..._quote.zip (Note: Data is still OHLCV trades)
-python -m ccxt_data_fetch.run cryptofuture minute quote
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute quote
 ```

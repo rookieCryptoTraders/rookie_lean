@@ -67,6 +67,59 @@ def compute_depth_features(
     return out
 
 
+def compute_ofi_lcr(
+    prev_depth: Optional[CryptoFutureDepthData],
+    curr_depth: Optional[CryptoFutureDepthData],
+) -> Dict[str, float]:
+    """
+    Order Flow Imbalance (OFI) and Liquidity Consumption Rate (LCR) proxy.
+
+    §4.1 / §4.3 of the design doc define OFI/LCR on event-level order flow.
+    Here we approximate them from consecutive L5 depth snapshots:
+
+    - OFI: net signed depth change (bid additions minus ask additions) normalised by total depth.
+    - LCR: total depth removed within 1 minute (sum of negative depth deltas) normalised by total depth.
+    """
+    out: Dict[str, float] = {
+        "depth_ofi_1m": 0.0,
+        "depth_lcr_1m": 0.0,
+    }
+    if prev_depth is None or curr_depth is None:
+        return out
+
+    try:
+        prev_pcts = list(getattr(prev_depth, "percentages", []))
+        prev_depths = list(getattr(prev_depth, "depths", []))
+        curr_pcts = list(getattr(curr_depth, "percentages", []))
+        curr_depths = list(getattr(curr_depth, "depths", []))
+
+        if not prev_pcts or not prev_depths or not curr_pcts or not curr_depths:
+            return out
+
+        prev_map = {float(p): float(d) for p, d in zip(prev_pcts, prev_depths)}
+        curr_map = {float(p): float(d) for p, d in zip(curr_pcts, curr_depths)}
+
+        ofi = 0.0
+        lcr = 0.0
+
+        for pct, curr_d in curr_map.items():
+            prev_d = prev_map.get(pct, 0.0)
+            delta = curr_d - prev_d
+            side = -1.0 if pct < 0 else 1.0  # negative % = bid side, positive % = ask side
+            ofi += side * delta
+            if delta < 0:
+                lcr += abs(delta)
+
+        total_depth = sum(curr_map.values())
+        if total_depth > 0:
+            out["depth_ofi_1m"] = float(ofi / total_depth)
+            out["depth_lcr_1m"] = float(lcr / total_depth)
+    except Exception:
+        pass
+
+    return out
+
+
 # ── OHLCV-based feature helpers (per 加密货币量化模型设计.md §2.1, §3, §4, §5.2, §6) ──
 
 def compute_parkinson_volatility(high: np.ndarray, low: np.ndarray) -> float:
@@ -311,6 +364,9 @@ class AltcoinShortAlphaModel(AlphaModel):
         self.depth_custom_symbols: Dict[Symbol, Symbol] = {}
         # Latest depth snapshot per trading symbol (updated from Slice in update())
         self.latest_depth: Dict[Symbol, CryptoFutureDepthData] = {}
+        # Simple depth-flow features (OFI/LCR) from consecutive snapshots
+        self._depth_flow_features: Dict[Symbol, Dict[str, float]] = {}
+        self._prev_depth_snapshot: Dict[Symbol, CryptoFutureDepthData] = {}
 
         # Last generated insights (for hybrid algorithms reading signals in on_data)
         self.latest_insights: List[Insight] = []
@@ -360,8 +416,16 @@ class AltcoinShortAlphaModel(AlphaModel):
             # Find the actual base symbol object tracked in coin_data
             for s in self.coin_data.keys():
                 if s.value == base_ticker:
+                    # Update latest snapshot
                     self.latest_depth[s] = depth_data
-                    # algorithm.debug(f"[Alpha-Depth] Captured live depth for {base_ticker}")
+
+                    # Compute OFI / LCR proxy from consecutive snapshots
+                    prev_snapshot = self._prev_depth_snapshot.get(s)
+                    flow_feats = compute_ofi_lcr(prev_snapshot, depth_data)
+                    if flow_feats:
+                        self._depth_flow_features[s] = flow_feats
+                    self._prev_depth_snapshot[s] = depth_data
+
                     break
 
         # 2. Only run the rest of the alpha logic on full-hour bars
@@ -774,6 +838,11 @@ class AltcoinShortAlphaModel(AlphaModel):
                 "depth_micro_price_divergence", 0.0
             )
 
+            # Depth-flow features from consecutive L5 snapshots (Doc §4.1 / §4.3)
+            flow_features = self._depth_flow_features.get(symbol, {}) or {}
+            depth_ofi_1m = float(flow_features.get("depth_ofi_1m", 0.0))
+            depth_lcr_1m = float(flow_features.get("depth_lcr_1m", 0.0))
+
             # SELECTION WEIGHT (Layer 1) — Regime-Adaptive + depth
             selection_weight = self._compute_selection_weight(
                 down_vol,
@@ -798,6 +867,8 @@ class AltcoinShortAlphaModel(AlphaModel):
                 "depth_obi_l5": round(depth_obi_l5, 4),
                 "depth_spread": round(depth_spread, 6),
                 "depth_micro_price_divergence": round(depth_micro_price_divergence, 4),
+                "depth_ofi_1m": round(depth_ofi_1m, 4),
+                "depth_lcr_1m": round(depth_lcr_1m, 4),
                 # OHLCV-based (Doc §2.1, §5.2, §6)
                 "parkinson_vol": round(parkinson_vol, 2),
                 "rogers_satchell_vol": round(rogers_satchell_vol, 2),
@@ -963,6 +1034,8 @@ class AltcoinShortAlphaModel(AlphaModel):
             "depth_obi_l5": 0.0,
             "depth_spread": 0.0,
             "depth_micro_price_divergence": 0.0,
+            "depth_ofi_1m": 0.0,
+            "depth_lcr_1m": 0.0,
             "parkinson_vol": 0.0,
             "rogers_satchell_vol": 0.0,
             "upper_shadow": 0.0,
@@ -1006,6 +1079,8 @@ class AltcoinShortAlphaModel(AlphaModel):
                     "depth_obi_l5": 0.0,
                     "depth_spread": 0.0,
                     "depth_micro_price_divergence": 0.0,
+                    "depth_ofi_1m": 0.0,
+                    "depth_lcr_1m": 0.0,
                     "parkinson_vol": 0.0,
                     "rogers_satchell_vol": 0.0,
                     "upper_shadow": 0.0,

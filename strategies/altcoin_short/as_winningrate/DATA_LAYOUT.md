@@ -12,7 +12,7 @@ All custom data lives under the LEAN **data folder** (set by `lean.json` → `"d
 
 - **Quote (minute QuoteBar):** Standard LEAN path `data/cryptofuture/binance/minute/<TICKER>/<YYYYMMDD>_quote.zip`  
   - CSV (no header): `Time (ms since midnight), BidOpen, BidHigh, BidLow, BidClose, BidSize, AskOpen, AskHigh, AskLow, AskClose, AskSize`.  
-  - Fetched by `ccxt_data_fetch.run_quote` from Binance (Vision bookTicker or REST `/fapi/v1/ticker/bookTicker`).  
+  - Fetched by `ccxt_data_fetch.run_fetch cryptofuture quote minute` from Binance (Vision bookTicker or REST `/fapi/v1/ticker/bookTicker`).  
   - Optional custom layout for strategies: `data/custom/cryptofuture-quote/...` (if you copy/symlink from the standard path).
 
 Tickers are **lowercase**, e.g. `btcusdt`, `ethusdt`.
