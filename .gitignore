@@ -28,8 +28,9 @@ lean.json
 launcher.log
 backtests/
 cli_commands
-backtests/
+**/backtests/
 **/lean.json
+**/optimizations/
 backtest
 preprocessors
 .QuantConnect

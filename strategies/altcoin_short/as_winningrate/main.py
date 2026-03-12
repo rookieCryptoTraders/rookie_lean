@@ -55,8 +55,8 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
         # Configuration
         self.symbols = []
-        self.depth_symbols = {}
-        self.quote_symbols = {}
+        self.depth_symbols: dict[Symbol, Symbol] = {}
+        self.quote_symbols: dict[Symbol, Symbol] = {}
         self.regime_model = None  # Placeholder if you add regime detection later
         self.alpha_model = None
 
@@ -67,12 +67,35 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         max_positions = int(self.get_parameter("max-positions", 5))
         leverage = int(self.get_parameter("leverage", 2))
         cooldown_minutes = float(self.get_parameter("cooldown-minutes", 60.0))
-        stop_loss_pct = float(self.get_parameter("stop-loss-pct", 0.10))
+        # 优先使用优化参数 hard-stop，其次兼容旧的 stop-loss-pct
+        hard_stop_default = float(self.get_parameter("hard-stop", 0.10))
+        stop_loss_pct = float(self.get_parameter("stop-loss-pct", hard_stop_default))
+
+        # Alpha 超参数（通过 optimize.json 做网格搜索）
+        insight_duration_hours = int(
+            self.get_parameter("insight-duration-hours", 48)
+        )
+        selection_weight_power = float(
+            self.get_parameter("selection-weight-power", 1.5)
+        )
+        max_adverse_vol_ratio = float(
+            self.get_parameter("max-adverse-vol-ratio", 3.0)
+        )
+        co_lookback = int(self.get_parameter("co-lookback", 24))
+        co_decay = float(self.get_parameter("co-decay", 0.95))
+
+        # 风险管理：快进止盈 & 跟踪止盈
+        flash_tp_threshold = float(
+            self.get_parameter("flash-tp-threshold", 0.08)
+        )
+        trailing_default = float(self.get_parameter("trailing-default", 0.05))
 
         self._max_positions = max_positions
         self._position_size = 1.0 / max_positions
         self._cooldown_minutes = cooldown_minutes
         self._stop_loss_pct = stop_loss_pct
+        self._flash_tp_threshold = flash_tp_threshold
+        self._trailing_default = trailing_default
 
         # 订阅合约并为每个交易标的创建简单指标容器
         self.symbols: list[Symbol] = []
@@ -84,6 +107,11 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         # Alpha model: all feature engineering lives inside AltcoinShortAlphaModel
         self.alpha_model = AltcoinShortAlphaModel(
             max_positions=max_positions,
+            insight_duration_hours=insight_duration_hours,
+            selection_weight_power=selection_weight_power,
+            max_adverse_vol_ratio=max_adverse_vol_ratio,
+            co_lookback=co_lookback,
+            co_decay=co_decay,
         )
         # Register AlphaModel with the Algorithm Framework so LEAN
         # drives its update() calls and manages Insight lifecycle.
@@ -166,6 +194,8 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         self._last_trade_time: dict[Symbol, datetime] = {}
         # L1 quote cache (bid, ask) from CryptoFutureQuoteData for backtest when Security.BidPrice/AskPrice are 0
         self._last_quote: dict[Symbol, tuple[float, float]] = {}
+        # 每个标的的最大浮动盈利（用于跟踪止盈）
+        self._max_favorable_pnl_pct: dict[Symbol, float] = {}
 
         # 定时状态日志（每小时一次）
         self.schedule.on(
@@ -204,7 +234,7 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         self.counter += 1
         now = self.time.replace(second=0, microsecond=0)
 
-        # Hard stop-loss per short position (percentage of entry cost)
+        # Hard stop-loss / 快进止盈 / 跟踪止盈（按持仓成本百分比）
         for holding in self.portfolio.values():
             if not holding.invested or holding.quantity >= 0:
                 continue
@@ -212,9 +242,34 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
             if cost <= 0:
                 continue
             pnl_pct = holding.unrealized_profit / cost
+            symbol = holding.symbol
+
+            # 更新该标的的最大浮动盈利
+            max_favorable = self._max_favorable_pnl_pct.get(symbol, 0.0)
+            if pnl_pct > max_favorable:
+                max_favorable = pnl_pct
+                self._max_favorable_pnl_pct[symbol] = max_favorable
+
+            # 硬止损：亏损超过 _stop_loss_pct 时立刻平仓
             if pnl_pct < -self._stop_loss_pct:
-                self.set_holdings(holding.symbol, 0.0)
-                self._last_trade_time[holding.symbol] = now
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
+                self._max_favorable_pnl_pct[symbol] = 0.0
+                continue
+
+            # 快进止盈：一根腿盈利超过 flash_tp_threshold，直接锁定收益
+            if pnl_pct > self._flash_tp_threshold:
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
+                self._max_favorable_pnl_pct[symbol] = 0.0
+                continue
+
+            # 跟踪止盈：从最大浮盈回撤超过 trailing_default 时止盈
+            if max_favorable > 0 and (max_favorable - pnl_pct) >= self._trailing_default:
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
+                self._max_favorable_pnl_pct[symbol] = 0.0
+                continue
 
         # Update L1 quote cache from custom quote data (for execution spread check in backtest)
         quote_dict = data.get(CryptoFutureQuoteData)
