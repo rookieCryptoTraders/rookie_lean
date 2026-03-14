@@ -20,6 +20,10 @@ _DEPTH_DOWNLOAD_MAX_RETRIES = 3
 _DEPTH_DOWNLOAD_RETRY_DELAY_SEC = 5
 
 
+# Timeout for Binance Vision file downloads (ZIPs can be large; longer than API timeout)
+_VISION_DOWNLOAD_TIMEOUT = 90
+
+
 def _download_with_retries(url: str) -> requests.Response | None:
     """
     Download a URL with bounded retries for transient network issues.
@@ -32,20 +36,30 @@ def _download_with_retries(url: str) -> requests.Response | None:
 
     for attempt in range(1, _DEPTH_DOWNLOAD_MAX_RETRIES + 1):
         try:
-            return requests.get(url, proxies=PROXIES, timeout=30)
+            return requests.get(url, proxies=PROXIES, timeout=_VISION_DOWNLOAD_TIMEOUT)
         except (requests.exceptions.ProxyError, OSError) as e:
             last_error = e
             # If proxy is flaky, try once without proxy in the same attempt.
             try:
                 logger.warning(
-                    f"Proxy-related error downloading {url} (attempt {attempt}/{_DEPTH_DOWNLOAD_MAX_RETRIES}): {e}. "
-                    "Retrying once without proxy..."
+                    "Proxy-related error downloading %s (attempt %s/%s): %s. Retrying once without proxy...",
+                    url, attempt, _DEPTH_DOWNLOAD_MAX_RETRIES, e,
                 )
-                return requests.get(url, timeout=30)
+                return requests.get(url, timeout=_VISION_DOWNLOAD_TIMEOUT)
             except Exception as no_proxy_e:
                 last_error = no_proxy_e
         except (requests.exceptions.Timeout, requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
             last_error = e
+            # Also try once without proxy (common when proxy is slow or drops SSL for Vision).
+            if PROXIES:
+                try:
+                    logger.warning(
+                        "Network error downloading %s (attempt %s/%s): %s. Retrying once without proxy...",
+                        url, attempt, _DEPTH_DOWNLOAD_MAX_RETRIES, e,
+                    )
+                    return requests.get(url, timeout=_VISION_DOWNLOAD_TIMEOUT)
+                except Exception as no_proxy_e:
+                    last_error = no_proxy_e
 
         if attempt < _DEPTH_DOWNLOAD_MAX_RETRIES:
             logger.warning(
@@ -163,14 +177,18 @@ def fetch_funding_rates(symbol, since_ms, until_ms):
     pbar.close()
     return all_rates
 
-def get_existing_depth_dates(symbol: str, asset_class: str = "cryptofuture") -> set[str]:
+def get_existing_depth_dates(
+    symbol: str,
+    asset_class: str = "cryptofuture",
+    resolution: str = "minute",
+) -> set[str]:
     """
     Return set of date strings (YYYYMMDD) for which depth data already exists on disk.
     Used for resume (skip these) or redownload (refetch and overwrite these).
     """
     formatted_symbol = format_symbol(symbol)
     symbol_dir = os.path.join(
-        DATA_LOCATION, asset_class, "binance", "minute", formatted_symbol
+        DATA_LOCATION, asset_class, "binance", resolution, formatted_symbol
     )
     if not os.path.isdir(symbol_dir):
         return set()
@@ -190,27 +208,26 @@ def fetch_and_save_depth_range(
     asset_class: str = "cryptofuture",
     margin_type: str = "um",
     data_source: str = "binancevision",
+    resolution: str = "minute",
     force_redownload: bool = False,
 ) -> None:
     """
-    Fetch depth data for the given range and save to LEAN format.
-    When force_redownload=False, skips dates that already have depth zip files (resume).
-    When force_redownload=True, fetches and overwrites all dates in range (redownload).
+    Fetch depth data for the given range and save to LEAN format under binance/<resolution>/<symbol>/.
+    resolution: minute | hour | daily. Minute = all snapshots; hour = one per hour; daily = one per day.
     """
+    if resolution not in ("minute", "hour", "daily"):
+        resolution = "minute"
     if force_redownload:
-        # Redownload: use full range as-is
         fetch_since = since_ms
     else:
-        # Resume: skip existing dates
-        existing_dates = get_existing_depth_dates(symbol, asset_class)
+        existing_dates = get_existing_depth_dates(symbol, asset_class, resolution)
         if existing_dates:
-            # Move start past the latest existing date
             latest_yyyymmdd = max(existing_dates)
             latest_dt = datetime.strptime(latest_yyyymmdd, "%Y%m%d").replace(tzinfo=timezone.utc)
             resume_ms = int((latest_dt + timedelta(days=1)).timestamp() * 1000)
             if resume_ms >= until_ms:
                 logger.info(
-                    f"Depth for {symbol} already up to date (latest {latest_yyyymmdd}), skipping."
+                    "Depth for %s already up to date (latest %s), skipping.", symbol, latest_yyyymmdd
                 )
                 return
             fetch_since = max(since_ms, resume_ms)
@@ -222,10 +239,10 @@ def fetch_and_save_depth_range(
     )
     if data:
         for date_str, depth_df in data.items():
-            save_depth_data(symbol, date_str, depth_df, asset_class=asset_class)
-        logger.info(f"Saved depth data for {symbol} ({len(data)} day(s)).")
+            save_depth_data(symbol, date_str, depth_df, asset_class=asset_class, resolution=resolution)
+        logger.info("Saved depth data for %s (%s day(s)) at %s resolution.", symbol, len(data), resolution)
     else:
-        logger.debug(f"No depth data fetched for {symbol} in range.")
+        logger.debug("No depth data fetched for %s in range.", symbol)
 
 
 def fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, margin_type="um", data_source="binancevision"):
@@ -290,36 +307,48 @@ def fetch_depth_range_cryptofuture(symbol, since_ms, until_ms, margin_type="um",
     return all_dfs_dict
 
 
-def save_depth_data(symbol,date_str:str, depth_data:pd.DataFrame, asset_class="cryptofuture"):
+def save_depth_data(
+    symbol: str,
+    date_str: str,
+    depth_data: pd.DataFrame,
+    asset_class: str = "cryptofuture",
+    resolution: str = "minute",
+) -> None:
     """
-    Save depth data to LEAN format.
+    Save depth data to LEAN format under binance/<resolution>/<symbol>/.
+    resolution: minute = all snapshots; hour = one per hour (00:00, 01:00, ...); daily = one per day (midnight).
     Format: ms_midnight, percentage, depth, notional
     """
     if depth_data.empty:
         return
+    if resolution not in ("minute", "hour", "daily"):
+        resolution = "minute"
     df = pd.DataFrame(depth_data)
-
     formatted_symbol = format_symbol(symbol)
     symbol_dir = os.path.join(
-        DATA_LOCATION, asset_class, "binance", "minute", formatted_symbol
+        DATA_LOCATION, asset_class, "binance", resolution, formatted_symbol
     )
     os.makedirs(symbol_dir, exist_ok=True)
 
-    # LEAN depth format: ms_midnight, percentage, depth, notional
-    df["timestamp"]=pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["ms_midnight"] = df["timestamp"].apply(get_ms_from_midnight)
 
-    # Filename: YYYYMMDD_depth.zip
+    if resolution == "hour":
+        # Keep one snapshot per hour (nearest to hour boundary)
+        hour_ms = (df["ms_midnight"] // 3_600_000) * 3_600_000
+        df = df.groupby(hour_ms, as_index=False).first()
+    elif resolution == "daily":
+        # Keep one snapshot per day (earliest of the day)
+        if len(df) > 0:
+            df = df.loc[[df["ms_midnight"].idxmin()]]
+
+    lean_df = df[["ms_midnight", "percentage", "depth", "notional"]]
     zip_path = os.path.join(symbol_dir, f"{date_str}_depth.zip")
     zf_name = f"{date_str}_depth.csv"
-    
-    lean_df = df[["ms_midnight", "percentage", "depth", "notional"]]
-    
-    logger.info(f"writing file to {zip_path}/{zf_name}")
     csv_content = lean_df.to_csv(index=False, header=False)
-
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(zf_name, csv_content)
+    logger.info("Wrote %s depth to %s", resolution, zip_path)
 
 
 def get_lean_df(df, asset_class, tick_type, time_col):
@@ -398,11 +427,11 @@ def save_ohlcv_data(symbol, ohlcv_data, resolution, asset_class="cryptofuture", 
         if resolution == "daily":
             df["time_val"] = df["dt"].dt.strftime("%Y%m%d 00:00")
             zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
-        else: # hour
+        elif resolution == "hour":
             df["time_val"] = df["dt"].dt.strftime("%Y%m%d %H:%M")
-            primary_tick = "quote" if asset_class in ["forex", "cfd"] else "trade"
-            suffix = f"_{tick_type}" if tick_type != primary_tick else ""
-            zip_path = os.path.join(base_dir, f"{formatted_symbol}{suffix}.zip")
+            zip_path = os.path.join(base_dir, f"{formatted_symbol}_{tick_type}.zip")
+        else:
+            raise ValueError(f"Unsupported resolution: {resolution}")
             
         csv_filename = f"{formatted_symbol}.csv"
         lean_df = get_lean_df(df, asset_class, tick_type, "time_val")
@@ -551,26 +580,24 @@ def _normalize_bookticker_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def aggregate_bookticker_to_minute_bars(raw_df: pd.DataFrame, align_minute_ms: int = 60_000) -> pd.DataFrame:
+def _aggregate_bookticker_to_bars(raw_df: pd.DataFrame, align_ms: int) -> pd.DataFrame:
     """
-    Aggregate raw bookTicker rows (timestamp, bid_price, bid_qty, ask_price, ask_qty) into minute QuoteBars.
-    Returns DataFrame with: time_val (ms since midnight), bid_open, bid_high, bid_low, bid_close, bid_size,
-    ask_open, ask_high, ask_low, ask_close, ask_size (LEAN minute quote format).
+    Aggregate raw bookTicker rows into QuoteBars at the given alignment (ms since midnight).
+    align_ms: 60_000 = minute, 3_600_000 = hour, 86_400_000 = daily (one bar per day).
+    Returns DataFrame with: time_val, bid_open, bid_high, bid_low, bid_close, bid_size, ask_*, ask_size.
     """
     need = {"timestamp", "bid_price", "bid_qty", "ask_price", "ask_qty"}
     if not need.issubset(raw_df.columns):
         missing = need - set(raw_df.columns)
-        logger.warning("aggregate_bookticker_to_minute_bars: missing columns %s", missing)
+        logger.warning("aggregate_bookticker: missing columns %s", missing)
         return pd.DataFrame()
     df = raw_df.dropna(subset=["timestamp", "bid_price", "ask_price"]).copy()
     if df.empty:
         return pd.DataFrame()
-    # Align to minute boundary (ms since midnight of the day)
-    df["date"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True).dt.date
     df["ms_midnight"] = df["timestamp"] % (24 * 60 * 60 * 1000)
-    df["minute_ms"] = (np.floor(df["ms_midnight"] / align_minute_ms) * align_minute_ms).astype(int)
-    df = df[df["minute_ms"] < 86400000]
-    agg = df.groupby("minute_ms", as_index=False).agg(
+    df["bucket_ms"] = (np.floor(df["ms_midnight"] / align_ms) * align_ms).astype(int)
+    df = df[df["bucket_ms"] < 86400000]
+    agg = df.groupby("bucket_ms", as_index=False).agg(
         bid_open=("bid_price", "first"),
         bid_high=("bid_price", "max"),
         bid_low=("bid_price", "min"),
@@ -582,8 +609,23 @@ def aggregate_bookticker_to_minute_bars(raw_df: pd.DataFrame, align_minute_ms: i
         ask_close=("ask_price", "last"),
         ask_size=("ask_qty", "last"),
     )
-    agg["time_val"] = agg["minute_ms"]
+    agg["time_val"] = agg["bucket_ms"]
     return agg
+
+
+def aggregate_bookticker_to_minute_bars(raw_df: pd.DataFrame, align_minute_ms: int = 60_000) -> pd.DataFrame:
+    """Aggregate raw bookTicker into minute QuoteBars (LEAN format)."""
+    return _aggregate_bookticker_to_bars(raw_df, align_minute_ms)
+
+
+def aggregate_bookticker_to_hour_bars(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate raw bookTicker into hour QuoteBars (one per hour, time_val = ms since midnight)."""
+    return _aggregate_bookticker_to_bars(raw_df, 3_600_000)
+
+
+def aggregate_bookticker_to_daily_bars(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate raw bookTicker into one daily QuoteBar (time_val = 0 = midnight)."""
+    return _aggregate_bookticker_to_bars(raw_df, 86_400_000)
 
 
 def fetch_bookticker_range_binance_vision(
@@ -594,7 +636,10 @@ def fetch_bookticker_range_binance_vision(
 ) -> dict[str, pd.DataFrame]:
     """
     Download cryptofuture bookTicker (best bid/ask) from Binance Vision for each day in range.
-    URL: https://data.binance.vision/data/futures/{um|cm}/daily/bookTicker/{SYMBOL}/{SYMBOL}-bookTicker-{date}.zip
+
+    Listing (browse) URL: https://data.binance.vision/?prefix=data/futures/um/daily/bookTicker/{SYMBOL}/
+    Download (direct file) URL: https://data.binance.vision/data/futures/{um|cm}/daily/bookTicker/{SYMBOL}/{SYMBOL}-bookTicker-{YYYY-MM-DD}.zip
+
     Returns dict date_str (YYYYMMDD) -> DataFrame with columns timestamp, bid_price, bid_qty, ask_price, ask_qty.
     Returns empty dict when Vision returns 404/500 (historical bookTicker may not be available for USD-M).
     """
@@ -617,6 +662,12 @@ def fetch_bookticker_range_binance_vision(
                     logger.debug("No Vision bookTicker for %s on %s (404)", symbol, date_str)
                 current += timedelta(days=1)
                 continue
+            # Binance Vision can return 200 with an XML error body (NoSuchKey) when the file does not exist
+            body = response.content[:1000] if response.content else b""
+            if b"<Error>" in body or b"NoSuchKey" in body or body.strip().startswith(b"<?xml"):
+                logger.debug("No Vision bookTicker for %s on %s (no such key)", symbol, date_str)
+                current += timedelta(days=1)
+                continue
             with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
                 names = zf.namelist()
                 entry = names[0] if names else None
@@ -629,6 +680,8 @@ def fetch_bookticker_range_binance_vision(
             if "timestamp" in raw.columns and "bid_price" in raw.columns and "ask_price" in raw.columns:
                 out[date_compact] = raw
                 logger.info("Fetched Vision bookTicker for %s on %s (%d rows)", symbol, date_str, len(raw))
+        except zipfile.BadZipFile:
+            logger.debug("No Vision bookTicker for %s on %s (invalid zip / no such key)", symbol, date_str)
         except Exception as e:
             logger.warning("Vision bookTicker %s %s: %s", symbol, date_str, e)
         current += timedelta(days=1)
@@ -659,21 +712,26 @@ def fetch_bookticker_rest(symbol: str, asset_class: str = "cryptofuture") -> dic
         return None
 
 
-def save_quote_bars_minute(
+def save_quote_bars(
     symbol: str,
     date_str: str,
     quote_bars_df: pd.DataFrame,
+    resolution: str,
     asset_class: str = "cryptofuture",
 ) -> None:
     """
-    Save minute QuoteBars to LEAN layout: data/cryptofuture/binance/minute/<symbol>/YYYYMMDD_quote.zip
+    Save QuoteBars to LEAN layout: data/<asset_class>/binance/<resolution>/<symbol>/YYYYMMDD_quote.zip
+    resolution: minute | hour | daily.
     CSV (no header): Time (ms since midnight), BidOpen, BidHigh, BidLow, BidClose, BidSize,
     AskOpen, AskHigh, AskLow, AskClose, AskSize.
     """
     if quote_bars_df is None or quote_bars_df.empty:
         return
+    if resolution not in ("minute", "hour", "daily"):
+        logger.warning("save_quote_bars: resolution %s not in minute/hour/daily, using minute", resolution)
+        resolution = "minute"
     formatted_symbol = format_symbol(symbol)
-    base_dir = os.path.join(DATA_LOCATION, asset_class, "binance", "minute")
+    base_dir = os.path.join(DATA_LOCATION, asset_class, "binance", resolution)
     symbol_dir = os.path.join(base_dir, formatted_symbol)
     os.makedirs(symbol_dir, exist_ok=True)
     df = quote_bars_df.copy()
@@ -684,13 +742,17 @@ def save_quote_bars_minute(
     csv_content = lean_df.to_csv(index=False, header=False, float_format="%.8f")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(zf_name, csv_content)
-    logger.info("Wrote minute quote to %s", zip_path)
+    logger.info("Wrote %s quote to %s", resolution, zip_path)
 
 
-def get_existing_quote_dates(symbol: str, asset_class: str = "cryptofuture") -> set[str]:
-    """Return set of date strings (YYYYMMDD) for which minute quote zip exists under binance/minute/<symbol>/."""
+def get_existing_quote_dates(
+    symbol: str,
+    asset_class: str = "cryptofuture",
+    resolution: str = "minute",
+) -> set[str]:
+    """Return set of date strings (YYYYMMDD) for which quote zip exists under binance/<resolution>/<symbol>/."""
     formatted_symbol = format_symbol(symbol)
-    symbol_dir = os.path.join(DATA_LOCATION, asset_class, "binance", "minute", formatted_symbol)
+    symbol_dir = os.path.join(DATA_LOCATION, asset_class, "binance", resolution, formatted_symbol)
     if not os.path.isdir(symbol_dir):
         return set()
     existing = set()
@@ -708,41 +770,458 @@ def fetch_and_save_quote_range(
     until_ms: int,
     asset_class: str = "cryptofuture",
     margin_type: str = "um",
+    resolution: str = "minute",
     force_redownload: bool = False,
 ) -> None:
     """
-    Fetch cryptofuture quote from Binance (Vision first, then REST for current snapshot if needed),
-    aggregate to minute QuoteBars, and save in QuantConnect format under data/cryptofuture/binance/minute/<symbol>/.
-
-    Minute resolution: one row per minute with Bid O/H/L/C, BidSize, Ask O/H/L/C, AskSize (LEAN QuoteBar).
+    Fetch cryptofuture quote (best bid/ask) from Binance Vision bookTicker (not depth).
+    Aggregate to the requested resolution (minute | hour | daily) and save under binance/<resolution>/<symbol>/.
     """
-    existing = get_existing_quote_dates(symbol, asset_class) if not force_redownload else set()
-    start_dt = datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc)
-    end_dt = datetime.fromtimestamp(until_ms / 1000, tz=timezone.utc)
+    logger.info(
+        "fetch_and_save_quote_range start: symbol=%s, asset_class=%s, margin_type=%s, "
+        "resolution=%s, since_ms=%s, until_ms=%s, force_redownload=%s",
+        symbol,
+        asset_class,
+        margin_type,
+        resolution,
+        since_ms,
+        until_ms,
+        force_redownload,
+    )
+
+    if resolution not in ("minute", "hour", "daily"):
+        logger.warning(
+            "fetch_and_save_quote_range: unsupported resolution %s, defaulting to 'minute'",
+            resolution,
+        )
+        resolution = "minute"
+
+    existing = (
+        get_existing_quote_dates(symbol, asset_class, resolution)
+        if not force_redownload
+        else set()
+    )
+    logger.info(
+        "fetch_and_save_quote_range existing quote dates for %s (%s, %s): %s",
+        symbol,
+        asset_class,
+        resolution,
+        sorted(existing),
+    )
 
     # 1) Binance Vision (historical bookTicker; may 404 for futures/um)
-    vision_data = fetch_bookticker_range_binance_vision(symbol, since_ms, until_ms, margin_type=margin_type)
+    logger.info(
+        "fetch_and_save_quote_range: fetching Vision bookTicker for %s from %s to %s (margin_type=%s)",
+        symbol,
+        since_ms,
+        until_ms,
+        margin_type,
+    )
+    vision_data = fetch_bookticker_range_binance_vision(
+        symbol, since_ms, until_ms, margin_type=margin_type
+    )
+    logger.info(
+        "fetch_and_save_quote_range: Vision returned %d day(s) for %s: %s",
+        len(vision_data),
+        symbol,
+        sorted(vision_data.keys()),
+    )
+
     for date_str, raw_df in vision_data.items():
+        logger.debug(
+            "fetch_and_save_quote_range: processing Vision day %s for %s, raw rows=%d",
+            date_str,
+            symbol,
+            len(raw_df) if raw_df is not None else -1,
+        )
+
         if not force_redownload and date_str in existing:
+            logger.info(
+                "fetch_and_save_quote_range: skipping %s on %s because quote zip already exists "
+                "(resolution=%s, force_redownload=%s)",
+                symbol,
+                date_str,
+                resolution,
+                force_redownload,
+            )
             continue
-        bars = aggregate_bookticker_to_minute_bars(raw_df)
-        if not bars.empty:
-            save_quote_bars_minute(symbol, date_str, bars, asset_class=asset_class)
+
+        if resolution == "minute":
+            bars = aggregate_bookticker_to_minute_bars(raw_df)
+        elif resolution == "hour":
+            bars = aggregate_bookticker_to_hour_bars(raw_df)
+        else:
+            bars = aggregate_bookticker_to_daily_bars(raw_df)
+        logger.debug(
+            "fetch_and_save_quote_range: aggregated Vision data for %s on %s into %d bar(s) "
+            "(resolution=%s)",
+            symbol,
+            date_str,
+            0 if bars is None else len(bars),
+            resolution,
+        )
+
+        if bars is not None and not bars.empty:
+            logger.info(
+                "fetch_and_save_quote_range: saving %d quote bar(s) for %s on %s "
+                "(resolution=%s, asset_class=%s)",
+                len(bars),
+                symbol,
+                date_str,
+                resolution,
+                asset_class,
+            )
+            save_quote_bars(symbol, date_str, bars, resolution, asset_class=asset_class)
+        else:
+            logger.warning(
+                "fetch_and_save_quote_range: no bars aggregated for %s on %s (resolution=%s); "
+                "raw rows may be empty or invalid",
+                symbol,
+                date_str,
+                resolution,
+            )
 
     # 2) If no Vision data and user wants at least one bar: append current REST snapshot as "today" (optional)
     if not vision_data and not existing:
+        logger.info(
+            "fetch_and_save_quote_range: no Vision data and no existing files for %s, "
+            "attempting REST snapshot fallback",
+            symbol,
+        )
         snap = fetch_bookticker_rest(symbol, asset_class=asset_class)
+        logger.debug("fetch_and_save_quote_range: REST snapshot for %s: %s", symbol, snap)
+
         if snap and snap.get("bid_price") and snap.get("ask_price"):
             now = datetime.now(timezone.utc)
             today = now.strftime("%Y%m%d")
             ms_midnight = get_ms_from_midnight(now)
-            minute_ms = int(np.floor(ms_midnight / 60_000) * 60_000)
-            one_bar = pd.DataFrame([{
-                "time_val": minute_ms,
-                "bid_open": snap["bid_price"], "bid_high": snap["bid_price"], "bid_low": snap["bid_price"], "bid_close": snap["bid_price"],
-                "bid_size": snap["bid_qty"],
-                "ask_open": snap["ask_price"], "ask_high": snap["ask_price"], "ask_low": snap["ask_price"], "ask_close": snap["ask_price"],
-                "ask_size": snap["ask_qty"],
-            }])
-            save_quote_bars_minute(symbol, today, one_bar, asset_class=asset_class)
-            logger.info("Saved one REST bookTicker bar for %s as %s (no Vision data)", symbol, today)
+
+            if resolution == "minute":
+                bucket_ms = int(np.floor(ms_midnight / 60_000) * 60_000)
+            elif resolution == "hour":
+                bucket_ms = int(np.floor(ms_midnight / 3_600_000) * 3_600_000)
+            else:
+                bucket_ms = 0
+
+            logger.debug(
+                "fetch_and_save_quote_range: building single REST bar for %s on %s at bucket_ms=%s "
+                "(resolution=%s)",
+                symbol,
+                today,
+                bucket_ms,
+                resolution,
+            )
+
+            one_bar = pd.DataFrame(
+                [
+                    {
+                        "time_val": bucket_ms,
+                        "bid_open": snap["bid_price"],
+                        "bid_high": snap["bid_price"],
+                        "bid_low": snap["bid_price"],
+                        "bid_close": snap["bid_price"],
+                        "bid_size": snap["bid_qty"],
+                        "ask_open": snap["ask_price"],
+                        "ask_high": snap["ask_price"],
+                        "ask_low": snap["ask_price"],
+                        "ask_close": snap["ask_price"],
+                        "ask_size": snap["ask_qty"],
+                    }
+                ]
+            )
+
+            save_quote_bars(symbol, today, one_bar, resolution, asset_class=asset_class)
+            logger.info(
+                "fetch_and_save_quote_range: saved one REST bookTicker bar for %s as %s (no Vision data)",
+                symbol,
+                today,
+            )
+        else:
+            logger.warning(
+                "fetch_and_save_quote_range: REST snapshot fallback for %s failed or returned empty prices",
+                symbol,
+            )
+
+    logger.info(
+        "fetch_and_save_quote_range done: symbol=%s, asset_class=%s, resolution=%s",
+        symbol,
+        asset_class,
+        resolution,
+    )
+
+
+def _normalize_aggtrades_for_quotes(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize Binance aggTrades CSV to columns suitable for quote reconstruction.
+
+    Expected Binance futures aggTrades layout (no header, 7+ columns):
+        0: agg_trade_id
+        1: price
+        2: qty
+        3: first_trade_id
+        4: last_trade_id
+        5: timestamp (Unix ms or ms since midnight)
+        6: is_buyer_maker (True if sell aggressor, False if buy aggressor)
+        [7: is_best_match]  # often dropped
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+
+    df = raw_df.copy()
+
+    # If columns are positional (0,1,2,...) assign Binance aggTrades semantics.
+    cols = list(df.columns)
+    col_map: dict[object, str] = {}
+    if all(isinstance(c, int) for c in cols):
+        if len(cols) >= 2:
+            col_map[cols[1]] = "price"
+        if len(cols) >= 3:
+            col_map[cols[2]] = "qty"
+        if len(cols) >= 6:
+            col_map[cols[5]] = "timestamp"
+        if len(cols) >= 7:
+            col_map[cols[6]] = "is_buyer_maker"
+    else:
+        # Fallback: try to infer from string column names.
+        for c in cols:
+            c_lower = str(c).strip().lower()
+            if c_lower in ("price", "p"):
+                col_map[c] = "price"
+            elif c_lower in ("qty", "quantity", "q"):
+                col_map[c] = "qty"
+            elif c_lower in ("timestamp", "time", "t", "transact_time"):
+                col_map[c] = "timestamp"
+            elif c_lower in ("isbuyermaker", "is_buyer_maker", "buyer_maker"):
+                col_map[c] = "is_buyer_maker"
+
+    df = df.rename(columns=col_map)
+
+    required = {"price", "qty", "timestamp"}
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        logger.warning("normalize_aggtrades_for_quotes: missing columns %s", missing)
+        return pd.DataFrame()
+
+    # Price and quantity as numeric.
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+
+    # Timestamp → ms since midnight UTC.
+    ts = pd.to_numeric(df["timestamp"], errors="coerce")
+    # Heuristic: values < 1 day are already "ms since midnight"; otherwise assume Unix ms.
+    one_day_ms = 24 * 60 * 60 * 1000
+    if ts.max(skipna=True) < one_day_ms:
+        ms_midnight = ts
+    else:
+        ms_midnight = ts % one_day_ms
+    df["ms_midnight"] = ms_midnight.astype("Int64")
+
+    # is_buyer_maker: True = seller aggressor → trade executes at bid.
+    if "is_buyer_maker" in df.columns:
+        s = df["is_buyer_maker"].astype(str).str.strip().str.lower()
+        df["is_buyer_maker"] = s.isin(("true", "1", "t", "yes", "y"))
+    else:
+        # Unknown aggressor side: mark as NA; quotes will treat such trades as neutral.
+        df["is_buyer_maker"] = pd.NA
+
+    df = df.dropna(subset=["ms_midnight", "price", "qty"])
+    return df[["ms_midnight", "price", "qty", "is_buyer_maker"]]
+
+
+def build_minute_quote_bars_from_aggtrades(
+    aggtrades_df: pd.DataFrame,
+    static_spread: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Build minute-level QuoteBars from Binance aggTrades.
+
+    Logic:
+    - Classify each trade as bid-side or ask-side using is_buyer_maker:
+        * is_buyer_maker = True  -> seller aggressor -> trade occurs at best bid.
+        * is_buyer_maker = False -> buyer aggressor -> trade occurs at best ask.
+    - Within each minute bucket:
+        * Collect bid and ask price sequences.
+        * If one side is missing, infer it from the other side plus/minus a static spread.
+        * Aggregate each side to OHLC and sum quantities as BidSize / AskSize.
+
+    Returns DataFrame with LEAN QuoteBar columns:
+        time_val, bid_open, bid_high, bid_low, bid_close, bid_size,
+        ask_open, ask_high, ask_low, ask_close, ask_size
+    """
+    norm = _normalize_aggtrades_for_quotes(aggtrades_df)
+    if norm.empty:
+        return pd.DataFrame()
+
+    df = norm.copy()
+    df["minute_bucket"] = (df["ms_midnight"] // 60_000) * 60_000
+
+    # Side labels based on is_buyer_maker.
+    is_bid = df["is_buyer_maker"] == True  # noqa: E712
+    is_ask = df["is_buyer_maker"] == False  # noqa: E712
+
+    df["bid_price"] = np.where(is_bid, df["price"], np.nan)
+    df["ask_price"] = np.where(is_ask, df["price"], np.nan)
+    df["bid_qty"] = np.where(is_bid, df["qty"], 0.0)
+    df["ask_qty"] = np.where(is_ask, df["qty"], 0.0)
+
+    rows: list[dict[str, float]] = []
+    for bucket_ms, g in df.groupby("minute_bucket"):
+        # Skip empty buckets (should not happen after grouping).
+        if g.empty:
+            continue
+
+        bid_prices = g["bid_price"].dropna()
+        ask_prices = g["ask_price"].dropna()
+
+        # Derive bid OHLC.
+        if not bid_prices.empty:
+            bid_open = bid_prices.iloc[0]
+            bid_high = float(bid_prices.max())
+            bid_low = float(bid_prices.min())
+            bid_close = bid_prices.iloc[-1]
+        elif not ask_prices.empty:
+            # No explicit bid trades; approximate bid from ask minus spread.
+            ask_open0 = ask_prices.iloc[0]
+            ask_high0 = float(ask_prices.max())
+            ask_low0 = float(ask_prices.min())
+            ask_close0 = ask_prices.iloc[-1]
+            bid_open = ask_open0 - static_spread
+            bid_high = ask_high0 - static_spread
+            bid_low = ask_low0 - static_spread
+            bid_close = ask_close0 - static_spread
+        else:
+            # No trades at all in this minute.
+            continue
+
+        # Derive ask OHLC.
+        if not ask_prices.empty:
+            ask_open = ask_prices.iloc[0]
+            ask_high = float(ask_prices.max())
+            ask_low = float(ask_prices.min())
+            ask_close = ask_prices.iloc[-1]
+        elif not bid_prices.empty:
+            # No explicit ask trades; approximate ask from bid plus spread.
+            bid_open0 = bid_prices.iloc[0]
+            bid_high0 = float(bid_prices.max())
+            bid_low0 = float(bid_prices.min())
+            bid_close0 = bid_prices.iloc[-1]
+            ask_open = bid_open0 + static_spread
+            ask_high = bid_high0 + static_spread
+            ask_low = bid_low0 + static_spread
+            ask_close = bid_close0 + static_spread
+        else:
+            # Already handled by previous branch; keep for clarity.
+            continue
+
+        bid_size = float(g["bid_qty"].sum())
+        ask_size = float(g["ask_qty"].sum())
+        total_qty = float(g["qty"].sum())
+
+        # If both sides have zero size (e.g. no aggressor info), split volume evenly.
+        if bid_size == 0.0 and ask_size == 0.0 and total_qty > 0.0:
+            bid_size = total_qty / 2.0
+            ask_size = total_qty / 2.0
+
+        rows.append(
+            {
+                "time_val": int(bucket_ms),
+                "bid_open": float(bid_open),
+                "bid_high": float(bid_high),
+                "bid_low": float(bid_low),
+                "bid_close": float(bid_close),
+                "bid_size": bid_size,
+                "ask_open": float(ask_open),
+                "ask_high": float(ask_high),
+                "ask_low": float(ask_low),
+                "ask_close": float(ask_close),
+                "ask_size": ask_size,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("time_val").reset_index(drop=True)
+
+
+def build_minute_quote_from_aggtrades_files(
+    symbol: str,
+    date_str: str,
+    asset_class: str = "cryptofuture",
+    static_spread: float = 0.5,
+) -> None:
+    """
+    Rebuild LEAN-compatible minute QuoteBars for one symbol/day from local aggTrades files.
+
+    Input:
+        data/<asset_class>/binance/aggtrades/<symbol>/<YYYYMMDD>_aggtrades.zip
+
+    Output:
+        data/<asset_class>/binance/minute/<symbol>/<YYYYMMDD>_quote.zip
+        with CSV columns:
+            Time(ms since midnight), BidOpen, BidHigh, BidLow, BidClose, BidSize,
+            AskOpen, AskHigh, AskLow, AskClose, AskSize.
+    """
+    formatted_symbol = format_symbol(symbol)
+    agg_dir = os.path.join(
+        DATA_LOCATION,
+        asset_class,
+        "binance",
+        "aggtrades",
+        formatted_symbol,
+    )
+    zip_name = f"{date_str}_aggtrades.zip"
+    zip_path = os.path.join(agg_dir, zip_name)
+
+    if not os.path.isfile(zip_path):
+        logger.warning(
+            "build_minute_quote_from_aggtrades_files: no aggTrades file for %s on %s at %s",
+            symbol,
+            date_str,
+            zip_path,
+        )
+        return
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            if not names:
+                logger.warning(
+                    "build_minute_quote_from_aggtrades_files: empty zip for %s on %s at %s",
+                    symbol,
+                    date_str,
+                    zip_path,
+                )
+                return
+            entry = names[0]
+            with zf.open(entry) as f:
+                raw = pd.read_csv(f, header=None, low_memory=False)
+    except Exception as e:
+        logger.error(
+            "build_minute_quote_from_aggtrades_files: failed to read %s: %s",
+            zip_path,
+            e,
+        )
+        return
+
+    bars = build_minute_quote_bars_from_aggtrades(raw, static_spread=static_spread)
+    if bars is None or bars.empty:
+        logger.warning(
+            "build_minute_quote_from_aggtrades_files: no quote bars built for %s on %s",
+            symbol,
+            date_str,
+        )
+        return
+
+    save_quote_bars(
+        symbol=symbol,
+        date_str=date_str,
+        quote_bars_df=bars,
+        resolution="minute",
+        asset_class=asset_class,
+    )
+    logger.info(
+        "build_minute_quote_from_aggtrades_files: wrote minute quote for %s on %s from %s",
+        symbol,
+        date_str,
+        zip_path,
+    )

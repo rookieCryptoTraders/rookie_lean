@@ -7,8 +7,7 @@ from alpha import AltcoinShortAlphaModel
 import time as ttime
 import os
 
-from config import ASSET_CLASS, BASE_DATA_PATH, EXCHANGE
-from config import DATA_LOCATION, PROXIES, _CONFIG_DIR, _PROJECT_ROOT
+from config import ASSET_CLASS, BASE_DATA_PATH, EXCHANGE, DATA_LOCATION, PROXIES, _CONFIG_DIR, _PROJECT_ROOT, START_DATE, END_DATE
 
 # datetime set time zone to UTC
 os.environ["TZ"] = "UTC"
@@ -39,27 +38,25 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
     """
 
     def initialize(self) -> None:
-        # Trace/verbose: log all details (DEBUG from utils/alpha + LEAN self.debug)
         log_level = (
-            (self.get_parameter("log-level", "debug") or "debug").strip().upper()
+            (self.get_parameter("log-level", "info") or "info").strip().upper()
         )
         if log_level in ("DEBUG", "TRACE", "VERBOSE", "1", "0"):
             logging.getLogger().setLevel(logging.DEBUG)
             for name in ("__main__", "utils", "alpha"):
                 logging.getLogger(name).setLevel(logging.DEBUG)
-            self.debug("[Init] Log level set to DEBUG (trace/verbose)")
 
         self.counter = 0
         self.set_time_zone("UTC")
-        self.set_start_date(2026, 1, 15)
-        self.set_end_date(2026, 1, 15)
+        self.set_start_date(year=int(START_DATE.split("-")[0]), month=int(START_DATE.split("-")[1]), day=int(START_DATE.split("-")[2]))
+        self.set_end_date(year=int(END_DATE.split("-")[0]), month=int(END_DATE.split("-")[1]), day=int(END_DATE.split("-")[2]))
         self.set_account_currency("USDT")
         self.set_cash(100000)  # 100k USDT
 
         # Configuration
         self.symbols = []
-        self.depth_symbols = {}
-        self.quote_symbols = {}
+        self.depth_symbols: dict[Symbol, Symbol] = {}
+        self.quote_symbols: dict[Symbol, Symbol] = {}
         self.regime_model = None  # Placeholder if you add regime detection later
         self.alpha_model = None
 
@@ -70,10 +67,35 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         max_positions = int(self.get_parameter("max-positions", 5))
         leverage = int(self.get_parameter("leverage", 2))
         cooldown_minutes = float(self.get_parameter("cooldown-minutes", 60.0))
+        # 优先使用优化参数 hard-stop，其次兼容旧的 stop-loss-pct
+        hard_stop_default = float(self.get_parameter("hard-stop", 0.10))
+        stop_loss_pct = float(self.get_parameter("stop-loss-pct", hard_stop_default))
+
+        # Alpha 超参数（通过 optimize.json 做网格搜索）
+        insight_duration_hours = int(
+            self.get_parameter("insight-duration-hours", 48)
+        )
+        selection_weight_power = float(
+            self.get_parameter("selection-weight-power", 1.5)
+        )
+        max_adverse_vol_ratio = float(
+            self.get_parameter("max-adverse-vol-ratio", 3.0)
+        )
+        co_lookback = int(self.get_parameter("co-lookback", 24))
+        co_decay = float(self.get_parameter("co-decay", 0.95))
+
+        # 风险管理：快进止盈 & 跟踪止盈
+        flash_tp_threshold = float(
+            self.get_parameter("flash-tp-threshold", 0.08)
+        )
+        trailing_default = float(self.get_parameter("trailing-default", 0.05))
 
         self._max_positions = max_positions
         self._position_size = 1.0 / max_positions
         self._cooldown_minutes = cooldown_minutes
+        self._stop_loss_pct = stop_loss_pct
+        self._flash_tp_threshold = flash_tp_threshold
+        self._trailing_default = trailing_default
 
         # 订阅合约并为每个交易标的创建简单指标容器
         self.symbols: list[Symbol] = []
@@ -85,6 +107,11 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         # Alpha model: all feature engineering lives inside AltcoinShortAlphaModel
         self.alpha_model = AltcoinShortAlphaModel(
             max_positions=max_positions,
+            insight_duration_hours=insight_duration_hours,
+            selection_weight_power=selection_weight_power,
+            max_adverse_vol_ratio=max_adverse_vol_ratio,
+            co_lookback=co_lookback,
+            co_decay=co_decay,
         )
         # Register AlphaModel with the Algorithm Framework so LEAN
         # drives its update() calls and manages Insight lifecycle.
@@ -94,11 +121,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         tickers = [
             "BTCUSDT",  # debug: only BTCUSDT to validate depth custom data
         ]
-        # Depth data path is resolved in utils.CryptoFutureDepthData.get_source using LEAN's data folder
-        self.debug(
-            f"[Init] Config: _CONFIG_DIR={_CONFIG_DIR}, _PROJECT_ROOT={_PROJECT_ROOT}, BASE_DATA_PATH={BASE_DATA_PATH}"
-        )
-
         added_count = 0
         alpha_symbols_to_register = []  # List to hold all symbols (base, depth, quote) for alpha model
         for ticker in tickers:
@@ -136,11 +158,8 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
                 alpha_symbols_to_register.append(quote_security.symbol)
 
                 added_count += 1
-                self.debug(f"[Init] Added CryptoFuture: {ticker}. symbol: {symbol}")
             except Exception as e:
                 self.debug(f"[Init] Failed to add {ticker}: {e}")
-
-        self.debug(f"[Init] Total CryptoFutures added: {added_count}/{len(tickers)}")
 
         # Benchmark: use lambda over our subscribed BTCUSDT so series align with performance
         # (avoids StatisticsBuilder "1 misaligned values" from separate Hour benchmark feed)
@@ -151,21 +170,32 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         if btc_sym is not None:
 
             def _benchmark_value(dt: datetime) -> float:
-                if btc_sym in self.securities and self.securities[btc_sym].price:
-                    return float(self.securities[btc_sym].price)
+                security = self.securities.get(btc_sym)
+                if security is None:
+                    return 1.0
+
+                # Prefer the close price of the BTCUSDT perpetual crypto future
+                close_price = getattr(security, "close", None)
+                if close_price:
+                    return float(close_price)
+
+                # Fallback to the generic security price if close is unavailable
+                if security.price:
+                    return float(security.price)
+
                 return 1.0
 
             self.set_benchmark(_benchmark_value)
-            self.debug("[Init] Benchmark set to BTCUSDT (lambda from subscribed security)")
         else:
             self.set_benchmark(lambda dt: 1.0)
-            self.debug("[Init] No symbol for benchmark; using constant 1.0")
 
         # 简单 warm-up，确保 EMA 等指标准备就绪
         self.set_warm_up(timedelta(days=1))
         self._last_trade_time: dict[Symbol, datetime] = {}
         # L1 quote cache (bid, ask) from CryptoFutureQuoteData for backtest when Security.BidPrice/AskPrice are 0
         self._last_quote: dict[Symbol, tuple[float, float]] = {}
+        # 每个标的的最大浮动盈利（用于跟踪止盈）
+        self._max_favorable_pnl_pct: dict[Symbol, float] = {}
 
         # 定时状态日志（每小时一次）
         self.schedule.on(
@@ -174,12 +204,9 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
             self._log_status,
         )
 
-        self.debug("=" * 60)
         self.debug(
-            f"Altcoin Short (AlphaModel + on_data execute) Initialized | "
-            f"Positions: {max_positions} | Leverage: {leverage}x"
+            f"Altcoin Short initialized | Positions: {max_positions} | Leverage: {leverage}x"
         )
-        self.debug("=" * 60)
 
     def _log_status(self) -> None:
         """定时状态日志"""
@@ -205,10 +232,44 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
             return
 
         self.counter += 1
-        if self.counter % 1000 == 0:
-            self.debug(f"[OnData] Heartbeat at {self.time}")
-
         now = self.time.replace(second=0, microsecond=0)
+
+        # Hard stop-loss / 快进止盈 / 跟踪止盈（按持仓成本百分比）
+        for holding in self.portfolio.values():
+            if not holding.invested or holding.quantity >= 0:
+                continue
+            cost = abs(holding.holdings_cost)
+            if cost <= 0:
+                continue
+            pnl_pct = holding.unrealized_profit / cost
+            symbol = holding.symbol
+
+            # 更新该标的的最大浮动盈利
+            max_favorable = self._max_favorable_pnl_pct.get(symbol, 0.0)
+            if pnl_pct > max_favorable:
+                max_favorable = pnl_pct
+                self._max_favorable_pnl_pct[symbol] = max_favorable
+
+            # 硬止损：亏损超过 _stop_loss_pct 时立刻平仓
+            if pnl_pct < -self._stop_loss_pct:
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
+                self._max_favorable_pnl_pct[symbol] = 0.0
+                continue
+
+            # 快进止盈：一根腿盈利超过 flash_tp_threshold，直接锁定收益
+            if pnl_pct > self._flash_tp_threshold:
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
+                self._max_favorable_pnl_pct[symbol] = 0.0
+                continue
+
+            # 跟踪止盈：从最大浮盈回撤超过 trailing_default 时止盈
+            if max_favorable > 0 and (max_favorable - pnl_pct) >= self._trailing_default:
+                self.set_holdings(symbol, 0.0)
+                self._last_trade_time[symbol] = now
+                self._max_favorable_pnl_pct[symbol] = 0.0
+                continue
 
         # Update L1 quote cache from custom quote data (for execution spread check in backtest)
         quote_dict = data.get(CryptoFutureQuoteData)
@@ -223,12 +284,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
         # 这里只读取最新的 insights，不再手动触发 update。
         insights = list(self.alpha_model.latest_insights)
         if not insights:
-            # Brief heartbeat to show we are reading alpha output
-            if self.counter % 60 == 0:
-                self.debug(
-                    f"[OnData] no insights | time={self.time} | "
-                    f"alpha_pool={len(self.alpha_model.coin_data)}"
-                )
             return
 
         # 只保留做空类 insight，按权重排序，限制最大标的数量
@@ -304,9 +359,6 @@ class AltcoinShortWinningRateAlgorithm(QCAlgorithm):
 
     def on_end_of_algorithm(self) -> None:
         """策略结束回调"""
-        self.debug("=" * 60)
-        self.debug("Altcoin Short Strategy Completed")
         self.debug(
-            f"Final Portfolio Value: ${self.portfolio.total_portfolio_value:,.2f}"
+            f"Altcoin Short completed | Final value: ${self.portfolio.total_portfolio_value:,.2f}"
         )
-        self.debug("=" * 60)

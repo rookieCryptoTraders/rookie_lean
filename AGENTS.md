@@ -36,7 +36,7 @@ Lean Binance trading workspace for algorithmic trading using QuantConnect Lean E
 - `ccxt_data_fetch/fetcher.py` – Core data fetching with ccxt, rate limiting, progress bars
 - `ccxt_data_fetch/utils.py` – Symbol formatting, time utilities, top-200 symbol list
 - `ccxt_data_fetch/config.py` – Centralized constants (DATA_LOCATION, ASSET_CLASS, PROXIES)
-- `ccxt_data_fetch/run.py` – Orchestration with resume logic for minute data
+- `ccxt_data_fetch/run_fetch.py` – Unified fetch entry (OHLCV, quote, depth, margin_interest)
 
 **Lean patterns:**
 - `BinanceBot/main.py` – Standard QCAlgorithm structure (Initialize, OnData)
@@ -78,11 +78,11 @@ lean live BinanceBot
 # Download Binance data
 lean data download --project BinanceBot --data-type-crypto --exchange Binance --tick-type Quote --resolution Hour
 
-# Run data fetcher (hourly)
-cd ccxt_data_fetch && python run.py hour
+# Run data fetcher (hourly OHLCV)
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv hour trade
 
-# Run data fetcher (minute)
-cd ccxt_data_fetch && python run.py minute
+# Run data fetcher (minute OHLCV)
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute trade
 ```
 
 ## NOTES

@@ -84,14 +84,14 @@ Main script to execute data downloads.
 
 **Usage**:
 ```bash
-# Download hourly data (default)
-python -m ccxt_data_fetch.run
+# Download hourly OHLCV (default)
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv hour trade
 
-# Download minute data
-python -m ccxt_data_fetch.run minute
+# Download minute OHLCV
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute trade
 
-# Download hourly data (explicit)
-python -m ccxt_data_fetch.run hour
+# Download hourly OHLCV (explicit)
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv hour trade
 ```
 
 **Features**:
@@ -111,7 +111,7 @@ Edit `config.py` to set:
 
 ### Step 2: Run Download
 ```bash
-python -m ccxt_data_fetch.run minute
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute trade
 ```
 
 ### Step 3: Monitor Output
@@ -163,8 +163,8 @@ Time (YYYYMMDD HH:mm), Open, High, Low, Close, Volume
 The module automatically detects existing data:
 ```bash
 # If download stopped on day 15
-python -m ccxt_data_fetch.run minute
-# Automatically resumes from day 16
+python -m ccxt_data_fetch.run_fetch cryptofuture ohlcv minute trade
+# Automatically resumes from day 16 (omit --redownload)
 ```
 
 ### Using Proxy
